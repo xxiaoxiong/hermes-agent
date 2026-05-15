@@ -13069,103 +13069,74 @@ class HermesCLI:
         # recovery is a full screen-clear (\x1b[2J\x1b[H) before the next
         # redraw, so we force one on every resize rather than trying to
         # compute the exact drift.
-        # DECSTBM scroll region fix for resize scrollback pollution.
+        # Resize handling: monkey-patch prompt_toolkit's _output_screen_diff
+        # to suppress the deliberate "reserve vertical space" scroll-up.
         #
-        # Root cause: prompt_toolkit's _output_screen_diff (renderer.py
-        # line 106) emits write("\r\n" * N) to advance the cursor between
-        # rows during paint, and explicitly scrolls to the bottom of the
-        # canvas at line 232-242 to "reserve vertical space".  At the
-        # bottom row, \r\n SCROLLS the viewport, pushing chrome content
-        # into terminal scrollback.  This is the actual mechanism behind
-        # pt issues #29 (open since 2014), #1675, #1933 — same wall hit
-        # by aider, xonsh, ipython.  Nobody has shipped a fix.
+        # Root cause (verified by reading pt/renderer.py):
+        # _output_screen_diff (renderer.py line 232-242) explicitly moves
+        # the cursor to the bottom of the canvas after painting "to make
+        # sure the terminal scrolls up, even when the lower lines of the
+        # canvas just contain whitespace".  In non-fullscreen mode this
+        # scrolls chrome content into terminal scrollback EVERY render —
+        # not just on resize.  Same wall as pt issues #29 (2014), #1675,
+        # #1933.  Aider/xonsh/ipython gave up.
         #
-        # Our fix: DECSTBM (\x1b[<top>;<bottom>r) sets a SCROLL REGION
-        # on the terminal.  When pt's \r\n scrolls within the region,
-        # rows that fall off the top of the region are DISCARDED
-        # instead of being pushed to terminal scrollback.  Region top
-        # must be > 1 — content scrolling off a region starting at
-        # row 1 still goes to scrollback (terminal treats region top=1
-        # as "no region").  Above row 2 it gets discarded.
-        #
-        # Same trick used by vim's status line, tmux, weechat, htop.
-        #
-        # IMPORTANT: DECSTBM resets the cursor to (1,1).  We save the
-        # cursor position with \x1b[s before setting the region and
-        # restore with \x1b[u after, so pt's initial paint still draws
-        # the chrome at the bottom (where the cursor was when hermes
-        # launched).
-        _output_obj = app.renderer.output
-
-        def _set_scroll_region():
-            try:
-                size = _output_obj.get_size()
-                # Region: rows 2 to size.rows.  Top=2 keeps everything
-                # except row 1 inside the region; row 1 is excluded so
-                # the very-top row stays as a sacrifice line outside.
-                #
-                # After DECSTBM, the cursor is reset to (1,1).  Move it
-                # explicitly to the bottom row so pt's renderer anchors
-                # the chrome at the bottom of the viewport (where it
-                # naturally lives in non-fullscreen mode).
-                _output_obj.write_raw(
-                    f"\x1b[2;{size.rows}r"       # set scroll region
-                    f"\x1b[{size.rows};1H"       # cursor to bottom row, col 1
-                )
-                _output_obj.flush()
-            except Exception:
-                pass
-
-        _set_scroll_region()
-
-        # Restore default scroll region on exit so the user's shell
-        # isn't left with a constrained scroll area.
-        def _restore_scroll_region():
-            try:
-                _output_obj.write_raw("\x1b[r")
-                _output_obj.flush()
-            except Exception:
-                pass
-
+        # Fix: monkey-patch the module-level function to skip the
+        # reserve-vertical-space cursor move.  This is the surgical
+        # change.  Without scroll-to-reserve, pt only moves the cursor
+        # within the layout's actual rows, and \r\n inside the layout
+        # body never reaches the bottom of the viewport (because the
+        # cursor walks up to layout-top first, then back down only as
+        # far as needed for each row).
         try:
-            atexit.register(_restore_scroll_region)
+            import prompt_toolkit.renderer as _pt_renderer
+            from prompt_toolkit.renderer import _output_screen_diff as _orig_osd
+
+            if not getattr(_pt_renderer, "_hermes_osd_patched", False):
+                from prompt_toolkit.data_structures import Point
+                from prompt_toolkit.layout.screen import Screen
+
+                def _patched_output_screen_diff(
+                    app, output, screen, current_pos, color_depth,
+                    previous_screen, last_style, is_done, full_screen,
+                    attrs_for_style_string, style_string_has_style,
+                    size, previous_width,
+                ):
+                    """Wraps pt's _output_screen_diff to suppress the
+                    reserve-vertical-space scroll (renderer.py L232-242).
+
+                    Strategy: trick the function into thinking
+                    current_height <= previous_screen.height, which makes
+                    its `if current_height > previous_screen.height` guard
+                    fall through and skip the move_cursor-to-bottom.
+
+                    We do this by inflating previous_screen.height to be
+                    >= screen.height before passing through.
+                    """
+                    try:
+                        prev = previous_screen if previous_screen is not None else Screen()
+                        if hasattr(prev, "height"):
+                            prev.height = max(prev.height, screen.height)
+                        previous_screen_arg = prev
+                    except Exception:
+                        previous_screen_arg = previous_screen
+
+                    return _orig_osd(
+                        app, output, screen, current_pos, color_depth,
+                        previous_screen_arg, last_style, is_done, full_screen,
+                        attrs_for_style_string, style_string_has_style,
+                        size, previous_width,
+                    )
+
+                _pt_renderer._output_screen_diff = _patched_output_screen_diff
+                _pt_renderer._hermes_osd_patched = True
         except Exception:
             pass
 
         _original_on_resize = app._on_resize
 
         def _resize_clear_ghosts():
-            # Re-set scroll region for new viewport size, then erase ONLY
-            # the bottom chrome rows (status bar + 2 separator rules +
-            # input area + a couple of safety rows = ~6 rows max).  This
-            # leaves chat output intact while wiping any ghost chrome
-            # rows that the column-shrink reflow left visible.
-            #
-            # \x1b[2K erases a single line (no scrollback push).  We
-            # walk up from the bottom for CHROME_ROWS rows, erasing each.
-            _set_scroll_region()
-            try:
-                size = _output_obj.get_size()
-                CHROME_ROWS = 8  # generous: chrome + reflow slack
-                start_row = max(2, size.rows - CHROME_ROWS + 1)
-                # Position cursor at the top of the chrome band, then
-                # for each row: erase entire line, move down.
-                buf = []
-                for i, row in enumerate(range(start_row, size.rows + 1)):
-                    buf.append(f"\x1b[{row};1H\x1b[2K")
-                # Park cursor at bottom row so pt's repaint anchors there.
-                buf.append(f"\x1b[{size.rows};1H")
-                _output_obj.write_raw("".join(buf))
-                _output_obj.flush()
-                try:
-                    from prompt_toolkit.data_structures import Point
-                    app.renderer._cursor_pos = Point(x=0, y=0)
-                    app.renderer._last_screen = None
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            _original_on_resize()
+            self._schedule_resize_recovery(app, _original_on_resize)
 
         app._on_resize = _resize_clear_ghosts
 
