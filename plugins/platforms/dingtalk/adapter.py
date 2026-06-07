@@ -1565,9 +1565,9 @@ def interactive_setup() -> None:
     lazy-imported so the plugin's module-load surface stays minimal.
     """
     from hermes_cli.config import get_env_value, save_env_value
+    from hermes_cli.setup import prompt_choice
     from hermes_cli.cli_output import (
         prompt,
-        prompt_choice,
         prompt_yes_no,
         print_header,
         print_success,

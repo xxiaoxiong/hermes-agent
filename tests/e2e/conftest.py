@@ -118,7 +118,7 @@ _ensure_discord_mock()
 _ensure_slack_mock()
 
 import discord  # noqa: E402 — mocked above
-from gateway.platforms.telegram import TelegramAdapter  # noqa: E402
+from plugins.platforms.telegram.adapter import TelegramAdapter  # noqa: E402
 from plugins.platforms.discord.adapter import DiscordAdapter  # noqa: E402
 
 import gateway.platforms.slack as _slack_mod  # noqa: E402

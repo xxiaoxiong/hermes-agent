@@ -532,9 +532,17 @@ class GatewayConfig:
         if checker is not None:
             return checker(config)
 
-        # Plugin-registered platforms
+        # Plugin-registered platforms.  Force plugin discovery first so this
+        # works even when GatewayConfig is constructed directly (e.g. in tests
+        # or callers that bypass load_gateway_config(), which is what triggers
+        # discovery in the normal path).  discover_plugins() is idempotent.
         try:
             from gateway.platform_registry import platform_registry
+            try:
+                from hermes_cli.plugins import discover_plugins
+                discover_plugins()
+            except Exception:
+                pass
             entry = platform_registry.get(platform.value)
             if entry:
                 if entry.is_connected is not None:

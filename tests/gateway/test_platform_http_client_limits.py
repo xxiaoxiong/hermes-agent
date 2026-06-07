@@ -78,7 +78,7 @@ def test_helper_is_importable_from_every_platform_that_uses_it():
     # Just importing exercises the helper's import path for each adapter.
     import gateway.platforms.qqbot.adapter  # noqa: F401
     import gateway.platforms.wecom  # noqa: F401
-    import gateway.platforms.dingtalk  # noqa: F401
+    import plugins.platforms.dingtalk.adapter  # noqa: F401
     import gateway.platforms.signal  # noqa: F401
     import gateway.platforms.bluebubbles  # noqa: F401
     import gateway.platforms.wecom_callback  # noqa: F401
@@ -98,7 +98,7 @@ class TestWhatsappTypingLeakFix:
 
     def test_bare_await_removed(self):
         import inspect
-        import gateway.platforms.whatsapp as mod
+        import plugins.platforms.whatsapp.adapter as mod
 
         src = inspect.getsource(mod.WhatsAppAdapter.send_typing)
         # The fix must be structural: the post() call is inside an

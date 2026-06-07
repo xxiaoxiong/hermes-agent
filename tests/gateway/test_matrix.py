@@ -341,7 +341,7 @@ class TestMatrixConfigLoading:
 
 def _make_adapter():
     """Create a MatrixAdapter with mocked config."""
-    from gateway.platforms.matrix import MatrixAdapter
+    from plugins.platforms.matrix.adapter import MatrixAdapter
     config = PlatformConfig(
         enabled=True,
         token="syt_test_token",
@@ -367,7 +367,7 @@ class TestMatrixTypingIndicator:
     @pytest.mark.asyncio
     async def test_stop_typing_clears_matrix_typing_state(self):
         """stop_typing() should send typing=false instead of waiting for timeout expiry."""
-        from gateway.platforms.matrix import RoomID
+        from plugins.platforms.matrix.adapter import RoomID
 
         await self.adapter.stop_typing("!room:example.org")
 
@@ -592,7 +592,7 @@ class TestMatrixBangCommandAlias:
         return captured_event
 
     def test_known_bang_command_normalizes_to_slash_command(self):
-        from gateway.platforms.matrix import _normalize_matrix_bang_command
+        from plugins.platforms.matrix.adapter import _normalize_matrix_bang_command
 
         assert _normalize_matrix_bang_command("!model") == "/model"
         assert (
@@ -606,7 +606,7 @@ class TestMatrixBangCommandAlias:
         assert _normalize_matrix_bang_command("!tasks") == "/tasks"
 
     def test_unknown_bang_text_is_not_treated_as_command(self):
-        from gateway.platforms.matrix import _normalize_matrix_bang_command
+        from plugins.platforms.matrix.adapter import _normalize_matrix_bang_command
 
         assert _normalize_matrix_bang_command("!important note") == "!important note"
         assert _normalize_matrix_bang_command("! wow") == "! wow"
@@ -666,7 +666,7 @@ class TestMatrixBangCommandAlias:
     def test_bang_alias_underscore_resolves_to_hyphen_form(self):
         """!set_home must emit a dispatchable token even though set_home is
         not itself registered — the hyphenated alias set-home is."""
-        from gateway.platforms.matrix import _normalize_matrix_bang_command
+        from plugins.platforms.matrix.adapter import _normalize_matrix_bang_command
 
         # set_home (underscore) is NOT a registered command/alias, but
         # set-home (hyphen) is. The normalizer must emit the resolvable form.
@@ -686,7 +686,7 @@ class TestMatrixBangCommandAlias:
         with patch.object(
             skill_commands_mod, "get_skill_commands", return_value=fake_skills
         ):
-            from gateway.platforms.matrix import _normalize_matrix_bang_command
+            from plugins.platforms.matrix.adapter import _normalize_matrix_bang_command
 
             # is_gateway_known_command won't know these; the skill branch must.
             assert _normalize_matrix_bang_command("!arxiv") == "/arxiv"
@@ -886,7 +886,7 @@ class TestMatrixDisplayName:
 
 class TestMatrixModuleImport:
     def test_module_importable_without_mautrix(self):
-        """gateway.platforms.matrix must be importable even when mautrix is
+        """plugins.platforms.matrix.adapter must be importable even when mautrix is
         not installed — otherwise the gateway crashes for ALL platforms.
 
         This test uses a subprocess to avoid polluting the current process's
@@ -908,7 +908,7 @@ class TestMatrixModuleImport:
                 "for k in list(sys.modules):\n"
                 "    if k.startswith('mautrix'): del sys.modules[k]\n"
                 "from unittest.mock import patch\n"
-                "from gateway.platforms.matrix import check_matrix_requirements\n"
+                "from plugins.platforms.matrix.adapter import check_matrix_requirements\n"
                 "with patch('tools.lazy_deps.ensure', side_effect=ImportError('blocked')):\n"
                 "    assert not check_matrix_requirements()\n"
                 "print('OK')\n"
@@ -925,7 +925,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test")
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
-        from gateway.platforms.matrix import check_matrix_requirements
+        from plugins.platforms.matrix.adapter import check_matrix_requirements
         try:
             import mautrix  # noqa: F401
             assert check_matrix_requirements() is True
@@ -937,13 +937,13 @@ class TestMatrixRequirements:
         monkeypatch.delenv("MATRIX_ACCESS_TOKEN", raising=False)
         monkeypatch.delenv("MATRIX_PASSWORD", raising=False)
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
-        from gateway.platforms.matrix import check_matrix_requirements
+        from plugins.platforms.matrix.adapter import check_matrix_requirements
         assert check_matrix_requirements() is False
 
     def test_check_requirements_without_homeserver(self, monkeypatch):
         monkeypatch.setenv("MATRIX_ACCESS_TOKEN", "syt_test")
         monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
-        from gateway.platforms.matrix import check_matrix_requirements
+        from plugins.platforms.matrix.adapter import check_matrix_requirements
         assert check_matrix_requirements() is False
 
     def test_check_requirements_encryption_true_no_e2ee_deps(self, monkeypatch):
@@ -952,7 +952,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False), \
              patch("tools.lazy_deps.ensure", side_effect=ImportError("mautrix unavailable")):
             assert matrix_mod.check_matrix_requirements() is False
@@ -963,7 +963,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False):
             # Still needs mautrix itself to be importable
             try:
@@ -979,7 +979,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.setenv("MATRIX_ENCRYPTION", "true")
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             try:
                 import mautrix  # noqa: F401
@@ -998,7 +998,7 @@ class TestMatrixRequirements:
         a confusing ``No module named 'asyncpg'`` deep in
         ``MatrixAdapter.connect()``.
         """
-        from gateway.platforms.matrix import _check_e2ee_deps
+        from plugins.platforms.matrix.adapter import _check_e2ee_deps
         import builtins
         real_import = builtins.__import__
 
@@ -1016,7 +1016,7 @@ class TestMatrixRequirements:
         Mautrix's ``Database.create("sqlite:///...")`` driver lookup imports
         aiosqlite lazily — without it, connect fails at ``crypto_db.start()``.
         """
-        from gateway.platforms.matrix import _check_e2ee_deps
+        from plugins.platforms.matrix.adapter import _check_e2ee_deps
         import builtins
         real_import = builtins.__import__
 
@@ -1040,7 +1040,7 @@ class TestMatrixRequirements:
         monkeypatch.setenv("MATRIX_HOMESERVER", "https://matrix.example.org")
         monkeypatch.delenv("MATRIX_ENCRYPTION", raising=False)
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
 
         # Simulate "mautrix installed, asyncpg missing" → feature_missing
         # returns a non-empty tuple → ensure_and_bind MUST be called.
@@ -1070,7 +1070,7 @@ class TestMatrixAccessTokenAuth:
     @pytest.mark.asyncio
     async def test_connect_with_access_token_and_encryption(self):
         """connect() should call whoami, set user_id/device_id, set up crypto."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1124,7 +1124,7 @@ class TestMatrixAccessTokenAuth:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
@@ -1176,7 +1176,7 @@ class TestMatrixE2EEHardFail:
 
     @pytest.mark.asyncio
     async def test_connect_fails_when_encryption_true_but_no_e2ee_deps(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1203,7 +1203,7 @@ class TestMatrixE2EEHardFail:
 
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=False):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_sync_loop", AsyncMock(return_value=None)):
@@ -1214,7 +1214,7 @@ class TestMatrixE2EEHardFail:
     @pytest.mark.asyncio
     async def test_connect_fails_when_crypto_setup_raises(self):
         """Even if _check_e2ee_deps passes, if OlmMachine raises, hard-fail."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1242,7 +1242,7 @@ class TestMatrixE2EEHardFail:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(side_effect=Exception("olm init failed"))
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 result = await adapter.connect()
@@ -1254,7 +1254,7 @@ class TestMatrixDeviceId:
     """MATRIX_DEVICE_ID should be used for stable device identity."""
 
     def test_device_id_from_config_extra(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1270,7 +1270,7 @@ class TestMatrixDeviceId:
     def test_device_id_from_env(self, monkeypatch):
         monkeypatch.setenv("MATRIX_DEVICE_ID", "FROM_ENV")
 
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1285,7 +1285,7 @@ class TestMatrixDeviceId:
     def test_device_id_config_takes_precedence_over_env(self, monkeypatch):
         monkeypatch.setenv("MATRIX_DEVICE_ID", "FROM_ENV")
 
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1301,7 +1301,7 @@ class TestMatrixDeviceId:
     @pytest.mark.asyncio
     async def test_connect_uses_configured_device_id_over_whoami(self):
         """When MATRIX_DEVICE_ID is set, it should be used instead of whoami device_id."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1348,7 +1348,7 @@ class TestMatrixDeviceId:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
@@ -1367,7 +1367,7 @@ class TestMatrixPasswordLoginDeviceId:
 
     @pytest.mark.asyncio
     async def test_password_login_uses_device_id(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1591,7 +1591,7 @@ class TestMatrixEncryptedSendFallback:
 class TestJoinedRoomsReference:
     def test_joined_rooms_reference_preserved_after_reassignment(self):
         """_CryptoStateStore must see updates after initial sync populates rooms."""
-        from gateway.platforms.matrix import _CryptoStateStore
+        from plugins.platforms.matrix.adapter import _CryptoStateStore
 
         joined = set()
         store = _CryptoStateStore(MagicMock(), joined)
@@ -1612,7 +1612,7 @@ class TestJoinedRoomsReference:
 class TestMatrixEncryptedEventHandler:
     @pytest.mark.asyncio
     async def test_connect_registers_encrypted_event_handler_when_encryption_on(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1658,7 +1658,7 @@ class TestMatrixEncryptedEventHandler:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 with patch.object(adapter, "_refresh_dm_cache", AsyncMock()):
@@ -1678,7 +1678,7 @@ class TestMatrixEncryptedEventHandler:
     @pytest.mark.asyncio
     async def test_connect_fails_on_stale_otk_conflict(self):
         """connect() must refuse E2EE when OTK upload hits 'already exists'."""
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
 
         config = PlatformConfig(
             enabled=True,
@@ -1727,7 +1727,7 @@ class TestMatrixEncryptedEventHandler:
         fake_mautrix_mods["mautrix.client"].Client = MagicMock(return_value=mock_client)
         fake_mautrix_mods["mautrix.crypto"].OlmMachine = MagicMock(return_value=mock_olm)
 
-        from gateway.platforms import matrix as matrix_mod
+        import plugins.platforms.matrix.adapter as matrix_mod
         with patch.object(matrix_mod, "_check_e2ee_deps", return_value=True):
             with patch.dict("sys.modules", fake_mautrix_mods):
                 result = await adapter.connect()
@@ -1800,7 +1800,7 @@ class TestMatrixMarkdownHtmlSecurity:
     """Tests for HTML injection prevention in _markdown_to_html_fallback."""
 
     def setup_method(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
         self.convert = MatrixAdapter._markdown_to_html_fallback
 
     def test_script_injection_in_header(self):
@@ -1861,7 +1861,7 @@ class TestMatrixMarkdownHtmlFormatting:
     """Tests for new formatting capabilities in _markdown_to_html_fallback."""
 
     def setup_method(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
         self.convert = MatrixAdapter._markdown_to_html_fallback
 
     def test_fenced_code_block(self):
@@ -1928,23 +1928,23 @@ class TestMatrixMarkdownHtmlFormatting:
 
 class TestMatrixLinkSanitization:
     def test_safe_https_url(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("https://example.com") == "https://example.com"
 
     def test_javascript_blocked(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("javascript:alert(1)") == ""
 
     def test_data_blocked(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("data:text/html,bad") == ""
 
     def test_vbscript_blocked(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
         assert MatrixAdapter._sanitize_link_url("vbscript:bad") == ""
 
     def test_quotes_escaped(self):
-        from gateway.platforms.matrix import MatrixAdapter
+        from plugins.platforms.matrix.adapter import MatrixAdapter
         result = MatrixAdapter._sanitize_link_url('http://x"y')
         assert '"' not in result
         assert "&quot;" in result
@@ -2561,7 +2561,7 @@ class TestMatrixClockSkewWarning:
         # Server events are dated 2h before startup_ts (skewed clock).
         skewed_event_ts_ms = int((self.adapter._startup_ts - 7200) * 1000)
 
-        with caplog.at_level(logging.WARNING, logger="gateway.platforms.matrix"):
+        with caplog.at_level(logging.WARNING, logger="plugins.platforms.matrix.adapter"):
             for i in range(5):
                 ev = self._mk_event(
                     sender=f"@alice{i}:example.org", ts_ms=skewed_event_ts_ms
@@ -2575,7 +2575,7 @@ class TestMatrixClockSkewWarning:
         # assertion.
         skew_warnings = [
             r for r in caplog.records
-            if r.name == "gateway.platforms.matrix"
+            if r.name == "plugins.platforms.matrix.adapter"
             and r.levelname == "WARNING"
             and "set-ntp" in r.getMessage()
         ]
@@ -2600,7 +2600,7 @@ class TestMatrixClockSkewWarning:
         self.adapter._startup_ts = now - 1
         old_ts_ms = int((self.adapter._startup_ts - 3600) * 1000)
 
-        with caplog.at_level(logging.WARNING, logger="gateway.platforms.matrix"):
+        with caplog.at_level(logging.WARNING, logger="plugins.platforms.matrix.adapter"):
             for i in range(5):
                 ev = self._mk_event(
                     sender=f"@alice{i}:example.org", ts_ms=old_ts_ms
@@ -2611,7 +2611,7 @@ class TestMatrixClockSkewWarning:
         assert self.adapter._clock_skew_warned is False
         skew_warnings = [
             r for r in caplog.records
-            if r.name == "gateway.platforms.matrix"
+            if r.name == "plugins.platforms.matrix.adapter"
             and "set-ntp" in r.getMessage()
         ]
         assert skew_warnings == []
@@ -2626,7 +2626,7 @@ class TestMatrixClockSkewWarning:
         self.adapter._startup_ts = now - 120  # extra slack vs the 30s gate
         old_ts_ms = int((self.adapter._startup_ts - 3600) * 1000)
 
-        with caplog.at_level(logging.WARNING, logger="gateway.platforms.matrix"):
+        with caplog.at_level(logging.WARNING, logger="plugins.platforms.matrix.adapter"):
             for i in range(2):  # only 2 late drops — under the threshold
                 ev = self._mk_event(
                     sender=f"@alice{i}:example.org", ts_ms=old_ts_ms
@@ -2652,7 +2652,7 @@ class TestMatrixClockSkewWarning:
         self.adapter._startup_ts = now - 120
         # Each event has a different age, ranging from 1h to 30d ago.
         ages_in_hours = [1, 24, 168, 720, 4]  # 1h, 1d, 1w, 30d, 4h
-        with caplog.at_level(logging.WARNING, logger="gateway.platforms.matrix"):
+        with caplog.at_level(logging.WARNING, logger="plugins.platforms.matrix.adapter"):
             for i, hrs in enumerate(ages_in_hours):
                 ts_ms = int((self.adapter._startup_ts - hrs * 3600) * 1000)
                 ev = self._mk_event(
@@ -2665,7 +2665,7 @@ class TestMatrixClockSkewWarning:
         assert self.adapter._clock_skew_warned is False
         skew_warnings = [
             r for r in caplog.records
-            if r.name == "gateway.platforms.matrix"
+            if r.name == "plugins.platforms.matrix.adapter"
             and "set-ntp" in r.getMessage()
         ]
         assert skew_warnings == []
@@ -2689,7 +2689,7 @@ class TestMatrixClockSkewWarning:
         self.adapter._startup_ts = now - 60
         skewed_ms = int((self.adapter._startup_ts - 7200) * 1000)
 
-        with caplog.at_level(logging.WARNING, logger="gateway.platforms.matrix"):
+        with caplog.at_level(logging.WARNING, logger="plugins.platforms.matrix.adapter"):
             for i in range(3):
                 ev = self._mk_event(
                     sender=f"@alice{i}:example.org", ts_ms=skewed_ms,
@@ -2715,7 +2715,7 @@ class TestMatrixClockSkewWarning:
 
         skew_warnings = [
             r for r in caplog.records
-            if r.name == "gateway.platforms.matrix"
+            if r.name == "plugins.platforms.matrix.adapter"
             and "set-ntp" in r.getMessage()
         ]
         assert len(skew_warnings) == 2, (
@@ -2792,7 +2792,7 @@ class TestMatrixProxyConfig:
             for k, v in proxy_env.items():
                 monkeypatch.setenv(k, v)
         with patch.dict("sys.modules", _make_fake_mautrix()):
-            from gateway.platforms.matrix import MatrixAdapter
+            from plugins.platforms.matrix.adapter import MatrixAdapter
             cfg = PlatformConfig(enabled=True, token="syt_test",
                                  extra={"homeserver": "https://matrix.example.org",
                                         "user_id": "@bot:example.org"})
@@ -2825,7 +2825,7 @@ class TestCreateMatrixSession:
     @pytest.mark.asyncio
     async def test_no_proxy_returns_trust_env_session(self):
         with patch.dict("sys.modules", _make_fake_mautrix()):
-            from gateway.platforms.matrix import _create_matrix_session
+            from plugins.platforms.matrix.adapter import _create_matrix_session
             session = _create_matrix_session(None)
             try:
                 assert session.trust_env is True
@@ -2835,7 +2835,7 @@ class TestCreateMatrixSession:
     @pytest.mark.asyncio
     async def test_http_proxy_sets_default_proxy(self):
         with patch.dict("sys.modules", _make_fake_mautrix()):
-            from gateway.platforms.matrix import _create_matrix_session
+            from plugins.platforms.matrix.adapter import _create_matrix_session
             session = _create_matrix_session("http://proxy:8080")
             try:
                 assert str(session._default_proxy) == "http://proxy:8080"
@@ -2853,7 +2853,7 @@ class TestCreateMatrixSession:
                     )
                 ),
             }):
-                from gateway.platforms.matrix import _create_matrix_session
+                from plugins.platforms.matrix.adapter import _create_matrix_session
                 session = _create_matrix_session("socks5://proxy:1080")
                 try:
                     assert session.connector is fake_connector

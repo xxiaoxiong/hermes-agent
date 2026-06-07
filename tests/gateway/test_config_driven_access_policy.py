@@ -107,7 +107,7 @@ def test_base_adapter_defaults_to_not_owning_access_policy():
         ("gateway.platforms.weixin", "WeixinAdapter"),
         ("gateway.platforms.yuanbao", "YuanbaoAdapter"),
         ("gateway.platforms.qqbot.adapter", "QQAdapter"),
-        ("gateway.platforms.whatsapp", "WhatsAppAdapter"),
+        ("plugins.platforms.whatsapp.adapter", "WhatsAppAdapter"),
     ],
 )
 def test_own_policy_adapters_declare_the_flag(module_path, class_name):

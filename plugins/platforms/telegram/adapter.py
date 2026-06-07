@@ -6252,8 +6252,21 @@ def _apply_yaml_config(yaml_cfg: dict, telegram_cfg: dict) -> dict | None:
     for _key in ("guest_mode", "disable_link_previews", "observe_unmentioned_group_messages"):
         if _key in telegram_cfg:
             extras.setdefault(_key, telegram_cfg[_key])
+    # Pass through telegram-specific extra keys (e.g. base_url proxy override),
+    # but EXCLUDE the generic shared-config keys that _merge_platform_map in
+    # gateway/config.py already merges with correct top-level-over-nested
+    # precedence. The apply_yaml_config_fn dispatch merges our return via
+    # dict.update() (clobber), so re-emitting those generic keys here would
+    # undo that precedence (top-level losing to a nested-fallback block).
+    _GENERIC_MERGE_KEYS = {
+        "reply_prefix", "reply_in_thread", "reply_to_mode",
+        "unauthorized_dm_behavior", "notice_delivery", "require_mention",
+        "channel_skill_bindings", "channel_prompts", "gateway_restart_notification",
+        "allow_from", "allow_admin_from", "dm_policy", "group_policy",
+    }
     for _k, _v in _telegram_extra.items():
-        extras.setdefault(_k, _v)
+        if _k not in _GENERIC_MERGE_KEYS:
+            extras.setdefault(_k, _v)
 
     return extras or None
 

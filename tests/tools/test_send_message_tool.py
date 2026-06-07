@@ -817,7 +817,7 @@ class TestSendToPlatformChunking:
 
         fake_module = SimpleNamespace(MatrixAdapter=FakeAdapter)
 
-        with patch.dict(sys.modules, {"gateway.platforms.matrix": fake_module}):
+        with patch.dict(sys.modules, {"plugins.platforms.matrix.adapter": fake_module}):
             result = asyncio.run(
                 _send_matrix_via_adapter(
                     SimpleNamespace(enabled=True, token="tok", extra={"homeserver": "https://matrix.example.com"}),
