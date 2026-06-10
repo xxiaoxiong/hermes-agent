@@ -212,6 +212,8 @@ export interface StoreState {
   switcher: SessionItem[] | undefined
   /** The open generic picker (model/skills/…); undefined when none. */
   picker: PickerState | undefined
+  /** Whether the Esc+Esc session prompt-history viewer is open (Epic 5). */
+  promptHistory: boolean
   /** Live completion candidates (slash-name/args or file/@-mention) shown above the composer. */
   completions: CompletionItem[] | undefined
   /** Char offset in the input where an accepted completion should start replacing
@@ -384,6 +386,7 @@ export function createSessionStore() {
     pager: undefined,
     switcher: undefined,
     picker: undefined,
+    promptHistory: false,
     completions: undefined,
     completionFrom: 0,
     subagents: [],
@@ -563,6 +566,14 @@ export function createSessionStore() {
   /** Close the generic picker. */
   function closePicker() {
     setState('picker', undefined)
+  }
+
+  /** Open / close the Esc+Esc session prompt-history viewer (Epic 5). */
+  function openPromptHistory() {
+    setState('promptHistory', true)
+  }
+  function closePromptHistory() {
+    setState('promptHistory', false)
   }
 
   /** Cache the mapped `/model` picker rows (instant open — Epic 7). */
@@ -956,6 +967,8 @@ export function createSessionStore() {
     closeSwitcher,
     openPicker,
     closePicker,
+    openPromptHistory,
+    closePromptHistory,
     setModelItems,
     setCompletions,
     clearCompletions,

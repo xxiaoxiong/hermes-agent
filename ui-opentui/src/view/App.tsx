@@ -16,8 +16,9 @@
 import { Match, Switch } from 'solid-js'
 
 import { deferClose } from '../logic/defer.ts'
-import type { PromptHistory } from '../logic/history.ts'
+import type { PromptHistory as ComposerHistory } from '../logic/history.ts'
 import type { PasteStore } from '../logic/pastes.ts'
+import { actionCommand, promptHistoryEntries } from '../logic/promptHistory.ts'
 import type { SessionStore } from '../logic/store.ts'
 import { AgentsTray, type AgentsTrayApi } from './agentsTray.tsx'
 import { Composer } from './composer.tsx'
@@ -26,6 +27,7 @@ import { Header } from './header.tsx'
 import { AgentsDashboard } from './overlays/agentsDashboard.tsx'
 import { Pager } from './overlays/pager.tsx'
 import { Picker } from './overlays/picker.tsx'
+import { PromptHistory } from './overlays/promptHistory.tsx'
 import { SessionSwitcher } from './overlays/sessionSwitcher.tsx'
 import { PromptOverlay } from './prompts/promptOverlay.tsx'
 import { SessionInfoProvider } from './sessionInfo.tsx'
@@ -41,7 +43,7 @@ export interface AppProps {
   readonly onRespond?: (method: string, params: Record<string, unknown>) => void
   readonly onResume?: (sessionId: string) => void
   readonly sessionId?: () => string | undefined
-  readonly history?: PromptHistory
+  readonly history?: ComposerHistory
   readonly onImagePaste?: () => void
   readonly pasteStore?: PasteStore
 }
@@ -63,12 +65,19 @@ export function App(props: AppProps) {
   const dashboard = () => props.store.state.dashboard
   const switcher = () => props.store.state.switcher
   const picker = () => props.store.state.picker
+  const promptHistory = () => props.store.state.promptHistory
   // Defer the close so the key that closed an overlay (Esc/q/Enter) can't land in
   // the freshly-remounted composer (see deferClose).
   const closePager = () => deferClose(() => props.store.closePager())
   const closeDashboard = () => deferClose(() => props.store.closeDashboard())
   const closeSwitcher = () => deferClose(() => props.store.closeSwitcher())
   const closePicker = () => deferClose(() => props.store.closePicker())
+  const closePromptHistory = () => deferClose(() => props.store.closePromptHistory())
+  // Esc+Esc viewer trigger (Epic 5): only when this session HAS user prompts —
+  // an empty session opens nothing (no empty modal).
+  const openPromptHistory = () => {
+    if (promptHistoryEntries(props.store.state.messages).length > 0) props.store.openPromptHistory()
+  }
   const resume = (id: string) => {
     ;(props.onResume ?? NOOP_RESUME)(id)
     closeSwitcher()
@@ -113,6 +122,7 @@ export function App(props: AppProps) {
                         pasteStore={props.pasteStore}
                         onFocusDown={() => trayApi?.focusTray() ?? false}
                         registerFocus={fn => (focusComposer = fn)}
+                        onDoubleEsc={openPromptHistory}
                       />
                     }
                   >
@@ -138,6 +148,13 @@ export function App(props: AppProps) {
                           onClose={closePicker}
                         />
                       )}
+                    </Match>
+                    <Match when={promptHistory()}>
+                      <PromptHistory
+                        entries={promptHistoryEntries(props.store.state.messages)}
+                        onAction={action => (props.onSubmit ?? NOOP)(actionCommand(action))}
+                        onClose={closePromptHistory}
+                      />
                     </Match>
                   </Switch>
                   {/* background-agents tray (Epic 2.7): renders nothing with no

@@ -42,6 +42,7 @@ import { useKeyboard } from '@opentui/solid'
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
 
 import { MENU_MAX, routeMenuKey } from '../logic/completionMenu.ts'
+import { createDoublePress } from '../logic/promptHistory.ts'
 import { analyzeSlash, learnableNames, nativeCharOffset } from '../logic/skillMatch.ts'
 import type { CompletionItem } from '../logic/store.ts'
 import type { PromptHistory } from '../logic/history.ts'
@@ -119,6 +120,10 @@ export function Composer(props: {
   onFocusDown?: (() => boolean) | undefined
   /** Hands the parent a "focus the textarea" callback (Esc from the tray). */
   registerFocus?: ((focus: () => void) => void) | undefined
+  /** Esc+Esc (≤800ms) on an EMPTY composer with no dropdown open (Epic 5): the
+   *  parent opens the session prompt-history viewer (or does nothing when the
+   *  session has no prompts yet — never an empty modal). */
+  onDoubleEsc?: (() => void) | undefined
 }) {
   const theme = useTheme()
   const dims = useDimensions()
@@ -254,6 +259,12 @@ export function Composer(props: {
     props.onDismiss?.()
   }
 
+  // Esc+Esc → session prompt history (Epic 5; free-code's double-press model).
+  // ONLY an Esc that nothing else consumed counts: the dropdown-dismiss branch
+  // returns before press() is reached (so a dismissing Esc never arms), and any
+  // other key resets the window (intervening keys disarm).
+  const doubleEsc = createDoublePress()
+
   const submit = () => {
     if (submitting || !ta) return
     // Expand any `[Pasted text #N]` placeholders back to their full content before
@@ -270,6 +281,9 @@ export function Composer(props: {
   }
 
   useKeyboard(key => {
+    // 0) double-Esc bookkeeping: any non-Esc press is an intervening key and
+    // disarms the pending Esc (free-code resets on every other input).
+    if (key.eventType !== 'release' && key.name !== 'escape') doubleEsc.reset()
     // 1) completion-menu keys while the dropdown is open (Epic 8): Tab accept /
     // Esc dismiss for ANY menu (the pre-existing semantics — Esc stays exactly
     // "dismiss if open, else fall through"), plus Up/Down/Enter for the SLASH
@@ -298,8 +312,22 @@ export function Composer(props: {
         // re-open it on the next analysis pass); any edit re-arms it.
         setDismissedFor(ta?.plainText ?? '')
         props.onDismiss?.()
+        // a CONSUMED Esc never counts toward the Esc+Esc viewer (Epic 5).
+        doubleEsc.reset()
         return
       }
+    }
+    // 1.5) Esc+Esc on an EMPTY, FOCUSED composer (no dropdown — the dismiss
+    // branch returned above) opens the session prompt-history viewer (Epic 5).
+    // With text in the buffer the Esc is just an intervening key (disarms);
+    // unfocused (e.g. the agents tray owns the keys) it never counts.
+    if (key.name === 'escape' && key.eventType !== 'release' && !key.ctrl && !key.meta && !key.option) {
+      if (ta?.focused === true && ta.plainText === '') {
+        if (doubleEsc.press()) props.onDoubleEsc?.()
+      } else {
+        doubleEsc.reset()
+      }
+      return
     }
     // 2) background-agents tray handoff (Epic 2.7): Down on an EMPTY focused
     // composer with NO dropdown open offers focus to the tray. The parent decides
