@@ -168,21 +168,6 @@ jobs:
           Get-ChildItem -Path ${{ github.workspace }}\source -Force | Move-Item -Destination $installDir -Force
           Write-Host "Isolated install dir ready: $installDir"
 
-      # ── Screen recording for coordinate discovery ───────────────────
-      - name: Start screen recording
-        shell: pwsh
-        run: |
-          # Start ffmpeg with stdin redirected so the teardown step can send 'q'
-          # and let it finalize the container cleanly. Killing ffmpeg outright
-          # leaves MP4/MKV files unplayable because the header is never written.
-          # PowerShell's -RedirectStandardInput requires the file to exist first.
-          New-Item -ItemType File -Path "$PWD\ffmpeg.stdin" -Force | Out-Null
-          $ffmpeg = Start-Process ffmpeg -ArgumentList "-y -f gdigrab -framerate 15 -i desktop -c:v libx264 -preset ultrafast recording.mkv" `
-            -RedirectStandardInput ffmpeg.stdin `
-            -RedirectStandardOutput ffmpeg.log `
-            -RedirectStandardError ffmpeg.err -PassThru
-          $ffmpeg.Id | Out-File ffmpeg.pid
-
       # ── Run the headed installer + AHK helper ───────────────────────
       # For the first run we deliberately do NOT click the "Install Hermes"
       # button.  AHK waits, captures the window, and exits.  A maintainer
@@ -194,8 +179,36 @@ jobs:
         run: |
           $installer = "Hermes-Setup.exe"
 
-          # Run the AHK helper first so it can detect the window.
-          $ahk = @'
+          # ── Start screen recording (live stdin pipe) ──────────────────
+          # ffmpeg must be started, fed, and stopped from the SAME step: the
+          # graceful-stop signal is the character 'q' written to ffmpeg's live
+          # stdin. A separate teardown step can't do this because the process
+          # that owns the writable stdin pipe dies when this step ends.
+          #
+          # Start-Process / -RedirectStandardInput <file> does NOT work: it
+          # hands ffmpeg a file handle opened once at EOF, so appending 'q' to
+          # the file on disk never reaches the running process. We need a real
+          # writable pipe, which only System.Diagnostics.Process exposes.
+          #
+          # -t 600 is a belt-and-suspenders cap so the container still
+          # finalizes even if the 'q' is somehow missed; -pix_fmt yuv420p keeps
+          # the output broadly playable.
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = "ffmpeg"
+          $psi.Arguments = "-y -f gdigrab -framerate 15 -i desktop -t 600 " +
+                           "-c:v libx264 -preset ultrafast -pix_fmt yuv420p recording.mkv"
+          $psi.RedirectStandardInput = $true
+          $psi.UseShellExecute = $false
+          $ffmpeg = [System.Diagnostics.Process]::Start($psi)
+          $ffmpeg.Id | Out-File ffmpeg.pid
+          # Note: stderr is intentionally left attached to the console so it is
+          # captured in the step log. Do NOT redirect a stream we don't drain --
+          # ffmpeg's progress output would fill the pipe buffer and block.
+          Write-Host "ffmpeg recording started (pid $($ffmpeg.Id))"
+
+          try {
+            # Run the AHK helper first so it can detect the window.
+            $ahk = @'
           #Requires AutoHotkey v2.0
           #SingleInstance Force
 
@@ -244,6 +257,26 @@ jobs:
           if ($proc -and -not $proc.HasExited) {
             Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           }
+          }
+          finally {
+            # Gracefully stop ffmpeg by writing 'q' to its LIVE stdin pipe, so
+            # the container header/index are finalized and the mkv is playable.
+            # This runs in the same step that owns the pipe, even on failure.
+            if ($ffmpeg -and -not $ffmpeg.HasExited) {
+              Write-Host "Stopping ffmpeg gracefully (q on stdin)"
+              try {
+                $ffmpeg.StandardInput.Write("q")
+                $ffmpeg.StandardInput.Close()
+              } catch {
+                Write-Host "Failed to write q to ffmpeg stdin: $_"
+              }
+              if (-not $ffmpeg.WaitForExit(15000)) {
+                Write-Host "ffmpeg did not exit after 15s; killing"
+                $ffmpeg.Kill()
+              }
+            }
+            Write-Host "ffmpeg stopped"
+          }
 
       # ── Run Playwright against the installed binary ─────────────────
       # (placeholder: will be enabled once installer completes successfully.)
@@ -256,24 +289,28 @@ jobs:
           HERMES_E2E_INSTALL_ROOT: ${{ env.HERMES_HOME }}\hermes-agent
 
       # ── Teardown & artifacts ────────────────────────────────────────
-      - name: Stop screen recording
+      # ffmpeg is normally started AND gracefully stopped inside the launch
+      # step (so 'q' reaches its live stdin pipe). This step is only a
+      # safety net: if the launch step timed out or crashed before its
+      # finally block ran, force-kill any orphaned ffmpeg so the runner can
+      # release recording.mkv for upload. The mkv container survives a hard
+      # kill (only the trailing seek index is lost), so the artifact is still
+      # usable for coordinate discovery even on this fallback path.
+      - name: Stop orphaned screen recording (safety net)
         if: always()
         shell: pwsh
         run: |
           $ffmpegpid = Get-Content ffmpeg.pid -ErrorAction SilentlyContinue
-          $proc = $null
           if ($ffmpegpid) {
             $proc = Get-Process -Id $ffmpegpid -ErrorAction SilentlyContinue
+            if ($proc) {
+              Write-Host "Orphaned ffmpeg (pid $ffmpegpid) still running; force-stopping"
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 2
+            } else {
+              Write-Host "ffmpeg already exited cleanly; nothing to do"
+            }
           }
-          if ($proc) {
-            # Gracefully ask ffmpeg to finalize the container ('q' on stdin).
-            "q" | Out-File -FilePath ffmpeg.stdin -NoNewline
-            $proc.WaitForExit(5000) | Out-Null
-          }
-          if ($proc -and -not $proc.HasExited) {
-            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-          }
-          Start-Sleep -Seconds 2
 
       - name: Upload screen recording
         uses: actions/upload-artifact@v4
