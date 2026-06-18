@@ -112,7 +112,7 @@ jobs:
       # Isolated install directory so the real install flow doesn't touch the
       # runner's user profile. Kept under the workspace for easy cleanup.
       HERMES_HOME: ${{ github.workspace }}\.e2e-hermes-home
-      INSTALL_DIR: "${{ github.workspace }}\.e2e-hermes-home\hermes-agent"
+      INSTALL_DIR: ${{ github.workspace }}\.e2e-hermes-home\hermes-agent
 
     steps:
       - uses: actions/checkout@v4
