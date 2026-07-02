@@ -322,7 +322,7 @@ def check_for_updates() -> Optional[int]:
     # (branding.tsx, guarded on `typeof === 'number' && > 0`) show nothing.
     try:
         from hermes_cli.config import detect_install_method, get_project_root
-        if detect_install_method() == "docker":
+        if detect_install_method(get_project_root()) == "docker":
             return None
     except Exception:
         pass
@@ -885,7 +885,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
             is_unsupported_install_method,
             get_project_root
         )
-        _install_method = detect_install_method()
+        _install_method = detect_install_method(get_project_root())
         if is_unsupported_install_method(_install_method):
             right_lines.append(
                 f"[bold yellow]⚠ {format_unsupported_install_warning(_install_method)}[/]"

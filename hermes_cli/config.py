@@ -439,8 +439,20 @@ def detect_install_method(project_root: Optional[Path] = None) -> str:
     managed = get_managed_system()
     if managed:
         return managed.lower().replace(" ", "-")
-    if (root / ".git").is_dir():
+    
+    # detect git repo installs (normal installer, development env)
+    git_path = root / ".git"
+    if git_path.is_dir():
         return "git"
+
+    # detect git repo installs from worktrees
+    if git_path.is_file():
+        try:
+            content = git_path.read_text(encoding="utf-8").strip()
+            if content.startswith("gitdir:"):
+                return "git"
+        except OSError:
+            pass
     return "pip"
 
 
@@ -526,7 +538,7 @@ def recommended_update_command() -> str:
     managed_cmd = get_managed_update_command()
     if managed_cmd:
         return managed_cmd
-    method = detect_install_method()
+    method = detect_install_method(get_project_root())
     return recommended_update_command_for_method(method)
 
 
