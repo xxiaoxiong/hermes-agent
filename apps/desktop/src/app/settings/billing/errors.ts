@@ -1,0 +1,128 @@
+import type { BillingRefusal } from './api'
+
+export interface BillingRefusalPresentation {
+  action: { type: 'none' } | { type: 'portal'; url?: string } | { type: 'retry' } | { type: 'step_up' }
+  message: string
+  title: string
+}
+
+const portalAction = (url?: string): BillingRefusalPresentation['action'] => ({ type: 'portal', url })
+
+const retryMessage = (refusal: BillingRefusal): string => {
+  const mins = refusal.retryAfter ? ` (try again in ~${Math.max(1, Math.round(refusal.retryAfter / 60))} min)` : ''
+
+  return `🟡 Too many charges right now${mins}. This isn't a payment failure.`
+}
+
+export const resolveRefusal = (refusal: BillingRefusal): BillingRefusalPresentation => {
+  switch (refusal.kind) {
+    case 'insufficient_scope':
+      return {
+        action: { type: 'step_up' },
+        message: 'This needs terminal billing enabled. Start a top-up to enable it, then retry.',
+        title: 'Terminal billing needs approval'
+      }
+    case 'remote_spending_revoked': {
+      const who =
+        refusal.actor === 'admin'
+          ? 'An admin turned off terminal billing for this terminal.'
+          : 'You turned off terminal billing for this terminal.'
+
+      return {
+        action: portalAction(refusal.portalUrl),
+        message: `${who} Reconnect to restore — run /portal to re-authorize this terminal.`,
+        title: 'Terminal billing was turned off'
+      }
+    }
+
+    case 'session_revoked':
+      return {
+        action: portalAction(refusal.portalUrl),
+        message: 'Your session was logged out. Run /portal to log in again.',
+        title: 'Session logged out'
+      }
+
+    case 'cli_billing_disabled':
+
+    case 'remote_spending_disabled':
+      return {
+        action: portalAction(refusal.portalUrl),
+        message: 'Terminal billing is off for this account — an admin must enable it on the portal.',
+        title: 'Terminal billing is off'
+      }
+
+    case 'role_required':
+      return {
+        action: portalAction(refusal.portalUrl),
+        message: 'Adding funds needs an org admin/owner. Ask an admin, or manage on the portal.',
+        title: 'Admin role required'
+      }
+
+    case 'idempotency_conflict':
+      return {
+        action: { type: 'none' },
+        message: '🔴 That charge key was already used for a different amount. Start a fresh top-up.',
+        title: 'Start a fresh top-up'
+      }
+
+    case 'no_payment_method':
+      return {
+        action: portalAction(refusal.portalUrl),
+        message:
+          '💳 No saved card for terminal charges yet. Set one up on the portal ' +
+          "(one-time credit buys don't save a reusable card).",
+        title: 'No saved card'
+      }
+    case 'monthly_cap_exceeded': {
+      const remaining = refusal.payload?.remainingUsd
+
+      return {
+        action: portalAction(refusal.portalUrl),
+        message:
+          remaining != null
+            ? `🔴 Monthly spend cap reached — $${remaining} headroom left.`
+            : '🔴 Monthly spend cap reached.',
+        title: 'Monthly spend cap reached'
+      }
+    }
+
+    case 'rate_limited':
+
+    case 'temporarily_unavailable':
+      return {
+        action: { type: 'retry' },
+        message: retryMessage(refusal),
+        title: 'Too many charges right now'
+      }
+
+    case 'endpoint_unavailable':
+      return {
+        action: { type: 'retry' },
+        message:
+          refusal.message ||
+          'Billing endpoint returned a non-JSON response (it may not be available on this deployment).',
+        title: 'Billing endpoint unavailable'
+      }
+
+    case 'timeout':
+      return {
+        action: { type: 'retry' },
+        message: refusal.message || 'Billing request timed out.',
+        title: 'Billing request timed out'
+      }
+
+    case 'transport':
+      return {
+        action: { type: 'retry' },
+        message: refusal.message || 'Billing request failed before reaching the gateway.',
+        title: 'Billing connection failed'
+      }
+
+    default:
+      return {
+        action: { type: 'none' },
+        message: refusal.message || 'Billing request failed.',
+        title: 'Billing request failed'
+      }
+  }
+}
