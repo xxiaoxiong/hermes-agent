@@ -272,6 +272,7 @@ export interface Translations {
       mcp: string
       archivedChats: string
       about: string
+      billing: string
       notifications: string
     }
     notifications: {
