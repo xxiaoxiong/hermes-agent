@@ -1686,13 +1686,19 @@ class AIAgent:
         inside ``_flush_messages_to_session_db`` and written only to the DB row,
         never mutating the live message list used by the API call (#48677 is
         thus closed for every persist caller, not just this one).
+
+        Protected by ``self._persistence_lock`` (RLock) so that the
+        close-time safety-net flush and the per-turn staged-user handoff
+        cannot interleave — preventing duplicate user rows in state.db
+        (#63766).
         """
-        # Scaffolding removal mutates the live list (desired — ephemeral
-        # retry/failure sentinels must not survive into the real transcript).
-        self._drop_trailing_empty_response_scaffolding(messages)
-        self._session_messages = messages
-        self._save_session_log(messages)
-        self._flush_messages_to_session_db(messages, conversation_history)
+        with self._persistence_lock:
+            # Scaffolding removal mutates the live list (desired — ephemeral
+            # retry/failure sentinels must not survive into the real transcript).
+            self._drop_trailing_empty_response_scaffolding(messages)
+            self._session_messages = messages
+            self._save_session_log(messages)
+            self._flush_messages_to_session_db(messages, conversation_history)
 
     def _drop_trailing_empty_response_scaffolding(self, messages: List[Dict]) -> None:
         """Remove private empty-response retry/failure scaffolding from transcript tails.

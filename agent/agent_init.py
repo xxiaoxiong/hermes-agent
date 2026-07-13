@@ -581,6 +581,18 @@ def init_agent(
     agent._interrupt_thread_signal_pending = False
     agent._client_lock = threading.RLock()
 
+    # Serializes the close-time safety-net flush (_persist_active_session_before_close)
+    # against the per-turn staged-user handoff in build_turn_context. Both paths persist
+    # the inbound user turn to the SQLite session store; without mutual exclusion the
+    # close path can flush the staged CLI dict (appended in HermesCLI.chat() before the
+    # agent worker thread publishes its own user_msg) AND the turn-start path can flush
+    # its freshly-built user_msg, producing a duplicate user row in state.db (#63766).
+    # RLock so the same thread can enter both _persist_session and _flush_messages_to_session_db
+    # re-entrantly without self-deadlock (the flush path holds the lock while calling
+    # append_message on the DB; nested persistence from a checkpoint or /compress path
+    # on the same thread is legitimate).
+    agent._persistence_lock = threading.RLock()
+
     # /steer mechanism — inject a user note into the next tool result
     # without interrupting the agent. Unlike interrupt(), steer() does
     # NOT set _interrupt_requested; it waits for the current tool batch

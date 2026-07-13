@@ -352,6 +352,11 @@ def build_turn_context(
     agent._ensure_db_session()
 
     # Crash-resilience: persist the inbound user turn as soon as the session row exists.
+    # Protected by agent._persistence_lock (RLock, acquired inside _persist_session) so
+    # the close-path safety-net flush (HermesCLI._persist_active_session_before_close)
+    # and this per-turn staged-user handoff cannot interleave. Without serialization,
+    # the close path and the turn-start flush each write a *different* user-message dict
+    # object for the same turn, producing a duplicate user row in state.db (#63766).
     try:
         agent._persist_session(messages, conversation_history)
     except Exception:

@@ -12824,22 +12824,42 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if not agent or not hasattr(agent, "_persist_session"):
             return
 
-        messages = getattr(agent, "_session_messages", None)
-        if not isinstance(messages, list):
-            messages = getattr(self, "conversation_history", None)
-        if not isinstance(messages, list) or not messages:
-            return
-
-        conversation_history = getattr(self, "conversation_history", None)
-        if not isinstance(conversation_history, list):
-            conversation_history = messages
-
+        # Hold the agent persistence lock across the read of `_session_messages` and
+        # the call to `_persist_session` so the close-path safety-net flush cannot
+        # observe a half-published staged user turn (HermesCLI.chat() appends to
+        # self.conversation_history BEFORE the agent worker thread publishes its own
+        # user_msg via _persist_session inside build_turn_context). Without this
+        # outer critical section, the close path can race the turn-start path and
+        # both paths persist *different* dict objects for the same user turn, leaving
+        # a duplicate user row in state.db (#63766). RLock acquires re-entrantly
+        # because _persist_session takes the same lock internally.
+        persist_lock = getattr(agent, "_persistence_lock", None)
+        if persist_lock is not None:
+            persist_lock.acquire()
         try:
-            agent._persist_session(messages, conversation_history)
-            if getattr(agent, "session_id", None):
-                self.session_id = agent.session_id
-        except (Exception, KeyboardInterrupt) as e:
-            logger.debug("Could not persist active CLI session before close: %s", e)
+            messages = getattr(agent, "_session_messages", None)
+            if not isinstance(messages, list):
+                messages = getattr(self, "conversation_history", None)
+            if not isinstance(messages, list) or not messages:
+                return
+
+            conversation_history = getattr(self, "conversation_history", None)
+            if not isinstance(conversation_history, list):
+                conversation_history = messages
+
+            try:
+                agent._persist_session(messages, conversation_history)
+                if getattr(agent, "session_id", None):
+                    self.session_id = agent.session_id
+            except (Exception, KeyboardInterrupt) as e:
+                logger.debug("Could not persist active CLI session before close: %s", e)
+        finally:
+            if persist_lock is not None:
+                try:
+                    persist_lock.release()
+                except RuntimeError:
+                    # Lock released by another thread; ignore.
+                    pass
 
     def _print_exit_summary(self, clear_screen: bool = True):
         """Print session resume info on exit, similar to Claude Code.
