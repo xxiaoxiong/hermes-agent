@@ -3840,6 +3840,23 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         try:
             return future.result(timeout=wait_timeout)
         except concurrent.futures.TimeoutError:
+            # On Python >= 3.8, concurrent.futures.TimeoutError is an alias of
+            # the builtin TimeoutError. That means this except branch catches
+            # not only "the poll expired, the future is still running" but also
+            # "the future has COMPLETED and its coroutine raised a real
+            # TimeoutError" (e.g. an inner asyncio.wait_for around an MCP
+            # call_tool hit mcp_servers.<srv>.timeout). In the latter case the
+            # future is done, future.result() returns instantly, re-raises the
+            # same stored exception, and we would otherwise `continue` into a
+            # tight spin that grows the exception's __traceback__ chain without
+            # bound (gateway OOM at ~108 MB/s — see issue #63892).
+            #
+            # Resolve once: if the future is done, surface its real outcome
+            # (value on a poll/success race, real exception otherwise) and let
+            # the caller's error path handle it. Only `continue` the poll loop
+            # when the future is genuinely still pending.
+            if future.done():
+                return future.result()
             continue
 
 
