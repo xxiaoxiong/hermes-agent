@@ -294,6 +294,108 @@ async def test_polling_conflict_becomes_fatal_after_retries(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_polling_conflict_becomes_fatal_after_wall_clock_limit(monkeypatch):
+    """A persistent 409 must escalate to fatal even when `start_polling()`
+    keeps returning successfully and resetting the attempt counter.
+
+    Regression test for #63724: when a competing long-poll holds the
+    Telegram getUpdates session, `start_polling()` returning does NOT prove
+    the conflict is resolved.  The next `getUpdates` raises 409 again, the
+    counter resets to 0 on each `start_polling()` "success", and the ladder
+    never reaches `MAX_CONFLICT_RETRIES` — the bot stays silently deaf for
+    days while the gateway reports healthy.  The wall-clock escalation gate
+    bounds the silent-deaf window so a stuck conflict state escalates to
+    retryable-fatal instead of looping forever.
+    """
+    adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
+    fatal_handler = AsyncMock()
+    adapter.set_fatal_error_handler(fatal_handler)
+
+    monkeypatch.setattr(
+        "gateway.status.acquire_scoped_lock",
+        lambda scope, identity, metadata=None: (True, None),
+    )
+    monkeypatch.setattr(
+        "gateway.status.release_scoped_lock",
+        lambda scope, identity: None,
+    )
+
+    captured = {}
+
+    async def fake_start_polling(**kwargs):
+        # `start_polling()` "succeeds" every time — but a competing long-poll
+        # is still holding the upstream getUpdates session, so the next poll
+        # will raise 409 again.  This is the heart of #63724.
+        captured["error_callback"] = kwargs["error_callback"]
+
+    updater = SimpleNamespace(
+        start_polling=AsyncMock(side_effect=fake_start_polling),
+        stop=AsyncMock(),
+        running=True,
+    )
+    bot = SimpleNamespace(set_my_commands=AsyncMock(), delete_webhook=AsyncMock())
+    app = SimpleNamespace(
+        bot=bot,
+        updater=updater,
+        add_handler=MagicMock(),
+        initialize=AsyncMock(),
+        start=AsyncMock(),
+    )
+    builder = MagicMock()
+    builder.token.return_value = builder
+    builder.request.return_value = builder
+    builder.get_updates_request.return_value = builder
+    builder.build.return_value = app
+    monkeypatch.setattr("plugins.platforms.telegram.adapter.Application", SimpleNamespace(builder=MagicMock(return_value=builder)))
+
+    # Speed up retries for testing
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+    # Drive `time.monotonic()` so each successive `_handle_polling_conflict`
+    # call sees a later wall-clock.  The first call anchors
+    # `_polling_conflict_first_seen`; subsequent calls advance past the
+    # 5-minute wall-clock limit while `start_polling()` keeps "succeeding"
+    # (which resets `_polling_conflict_count` to 0 each time).
+    fake_now = {"t": 0.0}
+
+    def fake_monotonic():
+        return fake_now["t"]
+
+    monkeypatch.setattr("plugins.platforms.telegram.adapter.time.monotonic", fake_monotonic)
+
+    ok = await adapter.connect()
+    assert ok is True
+
+    conflict = type("Conflict", (Exception,), {})
+
+    # First conflict at t=0 — anchors `_polling_conflict_first_seen`.
+    # `start_polling()` then succeeds, counter resets to 0.
+    await adapter._handle_polling_conflict(
+        conflict("Conflict: terminated by other getUpdates request")
+    )
+    assert adapter.has_fatal_error is False, "First conflict must not be fatal"
+    assert adapter._polling_conflict_count == 0, "Counter resets on start_polling success"
+    assert adapter._polling_conflict_first_seen is not None
+
+    # Second conflict well past the 5-minute wall-clock limit (t=400s).
+    # Even though `_polling_conflict_count` was reset to 0 by the previous
+    # `start_polling()` "success", the wall-clock gate must escalate to
+    # retryable-fatal instead of letting the ladder restart from 1/5.
+    fake_now["t"] = 400.0
+    await adapter._handle_polling_conflict(
+        conflict("Conflict: terminated by other getUpdates request")
+    )
+
+    assert adapter.fatal_error_code == "telegram_polling_conflict", (
+        f"Expected fatal after wall-clock escalation, got "
+        f"code={adapter.fatal_error_code}, count={adapter._polling_conflict_count}"
+    )
+    assert adapter.has_fatal_error is True
+    fatal_handler.assert_awaited_once()
+    await _cancel_heartbeat(adapter)
+
+
+@pytest.mark.asyncio
 async def test_connect_marks_retryable_fatal_error_for_startup_network_failure(monkeypatch):
     adapter = TelegramAdapter(PlatformConfig(enabled=True, token="***"))
 

@@ -18,6 +18,7 @@ import html as _html
 import re
 import threading
 from contextvars import ContextVar
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Any
 
@@ -643,6 +644,16 @@ class TelegramAdapter(BasePlatformAdapter):
         self._drop_delayed_deliveries = False
         self._polling_error_task: Optional[asyncio.Task] = None
         self._polling_conflict_count: int = 0
+        # Wall-clock timestamp of the first 409 Conflict in the current streak.
+        # `start_polling()` returning does NOT prove the upstream Telegram
+        # getUpdates session was released, so the attempt counter alone cannot
+        # guarantee escalation — #63724. We additionally bound the conflict
+        # state by elapsed time: if conflicts keep recurring past
+        # `_CONFLICT_WALL_CLOCK_LIMIT_SECS` since `_polling_conflict_first_seen`
+        # (regardless of intervening `start_polling()` "successes" that reset
+        # `_polling_conflict_count`), we escalate to retryable-fatal so the
+        # supervisor can restart the gateway instead of looping forever.
+        self._polling_conflict_first_seen: Optional[float] = None
         self._polling_network_error_count: int = 0
         self._polling_generation: int = 0
         self._polling_progress_event = asyncio.Event()
@@ -2679,6 +2690,29 @@ class TelegramAdapter(BasePlatformAdapter):
         # nor fatal — messages are silently dropped.  We schedule another
         # retry attempt instead of returning silently, and only escalate to
         # fatal after all retries are exhausted.
+        #
+        # Wall-clock escalation gate (#63724): a successful `start_polling()`
+        # does NOT prove the upstream Telegram getUpdates session was actually
+        # released — another long-poll may still hold it.  When that is the
+        # case, the next `getUpdates` raises 409 again, the counter starts
+        # from 1 once more, and the ladder never reaches `MAX_CONFLICT_RETRIES`
+        # even though the bot is silently deaf for days.  We anchor an
+        # immutable `_polling_conflict_first_seen` timestamp on the FIRST
+        # conflict of a streak; if conflicts keep recurring past
+        # `_CONFLICT_WALL_CLOCK_LIMIT_SECS` regardless of intervening
+        # `start_polling()` "successes", we escalate to retryable-fatal so
+        # the supervisor can restart the gateway instead of looping forever.
+        # The timestamp is cleared only on durable evidence of resolution
+        # (an update actually being consumed), not on `start_polling()` returning.
+        now_mono = time.monotonic()
+        if self._polling_conflict_first_seen is None:
+            self._polling_conflict_first_seen = now_mono
+        conflict_age = now_mono - self._polling_conflict_first_seen
+        # 5 minutes covers the typical server-side session expiry (~30s) with
+        # ample margin for repeated ladder cycles while still bounding the
+        # silent-deaf window to a tolerable operator-response delay.
+        _CONFLICT_WALL_CLOCK_LIMIT_SECS = 300.0
+
         self._polling_conflict_count += 1
 
         MAX_CONFLICT_RETRIES = 5
@@ -2688,13 +2722,13 @@ class TelegramAdapter(BasePlatformAdapter):
         # hammering the API on fast-restart loops.
         RETRY_DELAY = 10 + (self._polling_conflict_count * 10)  # seconds
 
-        if self._polling_conflict_count <= MAX_CONFLICT_RETRIES:
+        if self._polling_conflict_count <= MAX_CONFLICT_RETRIES and conflict_age < _CONFLICT_WALL_CLOCK_LIMIT_SECS:
             logger.warning(
-                "[%s] Telegram polling conflict (%d/%d) — previous session still "
+                "[%s] Telegram polling conflict (%d/%d, age=%.0fs) — previous session still "
                 "held open on Telegram's servers. Waiting %ds for it to expire. "
                 "Error: %s",
                 self.name, self._polling_conflict_count, MAX_CONFLICT_RETRIES,
-                RETRY_DELAY, error,
+                conflict_age, RETRY_DELAY, error,
             )
             # Stop the local updater cleanly before sleeping.  If it's already
             # stopped (e.g. PTB raised before updater.running was set) this is
