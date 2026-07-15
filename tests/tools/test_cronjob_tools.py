@@ -286,6 +286,58 @@ class TestUnifiedCronjobTool:
         assert listing["jobs"][0]["prompt_preview"] == ""
         assert listing["jobs"][0]["schedule"] == "every 60m"
 
+    def test_create_with_repeat_forever_string(self):
+        """``repeat=\"forever\"`` must not throw ``str <= int`` TypeError (#64520)."""
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Repeat forever test",
+                schedule="every 1h",
+                repeat="forever",
+            )
+        )
+        assert created["success"] is True, f"Expected success, got {created}"
+        # Verify internal storage: repeat.times should be None (infinite).
+        from cron.jobs import list_jobs
+        jobs = list_jobs()
+        assert len(jobs) >= 1
+        job = jobs[-1]  # most-recently created
+        assert job["repeat"]["times"] is None, f"Expected None (forever), got {job['repeat']['times']}"
+
+    def test_create_with_repeat_infinite_string(self):
+        """``repeat=\"infinite\"`` is accepted as a synonym for forever."""
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Infinite repeat test",
+                schedule="every 1h",
+                repeat="infinite",
+            )
+        )
+        assert created["success"] is True
+        from cron.jobs import list_jobs
+        jobs = list_jobs()
+        # Find the job we just created (last one with this prompt)
+        job = next(j for j in reversed(jobs) if j.get("prompt") == "Infinite repeat test")
+        assert job["repeat"]["times"] is None
+
+    def test_create_with_repeat_one_string(self):
+        """``repeat=\"1\"`` as a string is coerced to int 1."""
+        created = json.loads(
+            cronjob(
+                action="create",
+                prompt="Single run test",
+                schedule="30m",  # one-shot
+                repeat="1",
+            )
+        )
+        assert created["success"] is True
+        from cron.jobs import list_jobs
+        jobs = list_jobs()
+        job = next(j for j in reversed(jobs) if j.get("prompt") == "Single run test")
+        # For a one-shot schedule, repeat should be 1 (auto-set).
+        assert job["repeat"]["times"] == 1
+
     def test_pause_and_resume(self):
         created = json.loads(cronjob(action="create", prompt="Check", schedule="every 1h"))
         job_id = created["job_id"]
