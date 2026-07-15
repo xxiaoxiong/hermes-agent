@@ -844,7 +844,14 @@ function renderNodeToOutput(
           const pastClamp = haveClamp && ((pending < 0 && cur < cMin) || (pending > 0 && cur > cMax))
 
           const eff = pastClamp ? Math.min(4, innerHeight >> 3) : innerHeight
-          cur += isXtermJsHost() ? drainAdaptive(node, pending, eff) : drainProportional(node, pending, eff)
+          // sticky-follow is content-growth tracking, not a user wheel event —
+          // use proportional drain for fast catch-up so streaming text doesn't
+          // fall behind the viewport (xterm.js adaptive drain throttles to 2-3
+          // rows/frame, which can't keep up with LLM output rate).
+          const isStickyFollow = atBottom && pending >= 0
+          cur += isStickyFollow
+            ? drainProportional(node, pending, eff)
+            : (isXtermJsHost() ? drainAdaptive(node, pending, eff) : drainProportional(node, pending, eff))
         } else if (pending === 0) {
           // Opposite scrollBy calls cancelled to zero — clear so we don't
           // schedule an infinite loop of no-op drain frames.
