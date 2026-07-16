@@ -3457,7 +3457,50 @@ def run_job(
         clear_session_vars(_ctx_tokens)
         for _var_name in _cron_delivery_vars:
             _VAR_MAP[_var_name].set("")
-        if _session_db:
+        # Race fix #65208: the inner cron pool was shut down with
+        # ``wait=False, cancel_futures=True`` above (line ~3306), but a
+        # ThreadPoolExecutor can only cancel NOT-YET-STARTED futures — a
+        # worker already running ``agent.run_conversation`` continues
+        # executing. That worker may still be in the middle of an
+        # ``append_message`` → ``_execute_write`` → ``self._conn.execute``
+        # call against ``_session_db``.  If we ``_session_db.close()`` here
+        # (which sets ``self._conn = None``) while the worker is still
+        # writing, the worker raises ``'NoneType' object has no attribute
+        # 'execute'`` and the message is lost (or worse, the next ``commit``
+        # explodes the WAL).
+        #
+        # Mitigation: bounded-wait the worker thread BEFORE closing the
+        # session store. If it exits within the grace window, we close
+        # cleanly. If it is still stuck past the grace window (an
+        # ``agent.interrupt`` that didn't take, a wedged tool, an API call
+        # mid-flight), we LEAVE ``_session_db`` OPEN and let the process
+        # exit GC handle it — the worker can still finish its write
+        # against a live connection. The bounded wait is short on purpose:
+        # ``agent.interrupt()`` already ran on the inactivity-timeout path,
+        # and the worker thread observes the interrupt at the next tool /
+        # API boundary, so this is a tail-latency grace, not a long block.
+        _CRON_WORKER_JOIN_GRACE_SECS = 5.0
+        _cron_worker_exited = True
+        try:
+            if _cron_future is not None and not _cron_future.done():
+                _done, _ = concurrent.futures.wait(
+                    {_cron_future}, timeout=_CRON_WORKER_JOIN_GRACE_SECS,
+                )
+                _cron_worker_exited = bool(_done)
+                if not _cron_worker_exited:
+                    logger.warning(
+                        "Job '%s': cron worker still running %dss after "
+                        "shutdown — leaving SessionDB open to avoid "
+                        "'NoneType' execute race (#65208); process exit "
+                        "will GC the connection",
+                        job_id, int(_CRON_WORKER_JOIN_GRACE_SECS),
+                    )
+        except Exception as _join_exc:
+            logger.debug(
+                "Job '%s': bounded wait for cron worker exit failed: %s",
+                job_id, _join_exc,
+            )
+        if _session_db and _cron_worker_exited:
             # Title the cron session from the job (name → short prompt → id) so
             # sidebars/history show a meaningful label instead of the injected
             # "[IMPORTANT: …]" hint that is the session's first message. Set here

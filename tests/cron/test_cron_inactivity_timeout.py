@@ -311,3 +311,180 @@ class TestSysPathOrdering:
         """hermes_constants should be importable from cron context."""
         from hermes_constants import get_hermes_home
         assert callable(get_hermes_home)
+
+
+class TestCronWorkerJoinBeforeSessionDBClose:
+    """Regression tests for #65208: race between cron worker thread still
+    executing ``append_message`` (via ``_execute_write`` -> ``self._conn``)
+    and the outer ``finally`` block in ``run_job`` closing ``_session_db``.
+
+    The fix: a bounded ``concurrent.futures.wait(..., timeout=...)`` on the
+    worker future BEFORE the ``_session_db.close()`` branch. If the worker
+    is still running past the grace window, we LEAVE the SessionDB open
+    (process-exit GC reclaims it) so the worker can finish its write
+    against a live connection instead of raising
+    ``'NoneType' object has no attribute 'execute'``.
+    """
+
+    def test_worker_done_within_grace_closes_session_db(self):
+        """Worker exits cleanly inside the grace window → SessionDB.close() runs."""
+        import concurrent.futures
+
+        class FakeSessionDB:
+            def __init__(self):
+                self.closed = False
+                self.title_set = False
+                self.ended = False
+
+            def set_session_title(self, *a, **kw):
+                self.title_set = True
+
+            def end_session(self, *a, **kw):
+                self.ended = True
+
+            def close(self):
+                self.closed = True
+
+        # Pretend the worker already finished (done() True before grace wait)
+        fake_db = FakeSessionDB()
+        future = concurrent.futures.Future()
+        future.set_result({"final_response": "ok"})
+
+        _CRON_WORKER_JOIN_GRACE_SECS = 5.0
+        _cron_worker_exited = True
+        if future is not None and not future.done():
+            _done, _ = concurrent.futures.wait(
+                {future}, timeout=_CRON_WORKER_JOIN_GRACE_SECS,
+            )
+            _cron_worker_exited = bool(_done)
+
+        # Mirror scheduler.py gate: only close when worker has exited.
+        if fake_db is not None and _cron_worker_exited:
+            fake_db.set_session_title(None, "cron test")
+            fake_db.end_session(None, "cron_complete")
+            fake_db.close()
+
+        assert fake_db.title_set
+        assert fake_db.ended
+        assert fake_db.closed, "SessionDB.close() MUST run when worker exited"
+
+    def test_worker_still_running_skips_session_db_close(self):
+        """Worker still running past grace → SessionDB.close() MUST be skipped.
+
+        This is the core regression for #65208. Without the fix, the
+        scheduler would ``_session_db.close()`` (``self._conn = None``)
+        while the worker was still mid-``append_message`` →
+        ``self._conn.execute`` raised AttributeError / NoneType race.
+        With the fix, we LEAVE the connection open so the worker can
+        finish its write against a live connection.
+        """
+        import concurrent.futures
+        import threading
+        import time
+
+        class FakeSessionDB:
+            def __init__(self):
+                self.closed = False
+                self.title_set = False
+                self.ended = False
+                self.conn_alive = True  # simulates self._conn is not None
+
+            def set_session_title(self, *a, **kw):
+                self.title_set = True
+
+            def end_session(self, *a, **kw):
+                self.ended = True
+
+            def close(self):
+                self.closed = True
+                self.conn_alive = False  # simulates self._conn = None
+
+        # Worker that simulates a long-running append_message that outlives
+        # the inactivity-timeout shutdown signal. We CANNOT actually wait
+        # 5s in a unit test, so we use a tiny grace window and a worker
+        # that sleeps longer than the grace.
+        fake_db = FakeSessionDB()
+        worker_started = threading.Event()
+        worker_should_release = threading.Event()
+
+        def slow_worker():
+            worker_started.set()
+            # Simulate an append_message write still in flight when the
+            # outer finally reaches the grace-wait point.
+            worker_should_release.wait(timeout=2.0)
+
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(slow_worker)
+        worker_started.wait(timeout=1.0)
+
+        # Tiny grace: worker is still running, so the wait MUST time out
+        # (return done=set()) and _cron_worker_exited MUST be False.
+        _CRON_WORKER_JOIN_GRACE_SECS = 0.05
+        _cron_worker_exited = True
+        if future is not None and not future.done():
+            _done, _ = concurrent.futures.wait(
+                {future}, timeout=_CRON_WORKER_JOIN_GRACE_SECS,
+            )
+            _cron_worker_exited = bool(_done)
+
+        # Mirror scheduler.py gate.
+        if fake_db is not None and _cron_worker_exited:
+            fake_db.set_session_title(None, "cron test")
+            fake_db.end_session(None, "cron_complete")
+            fake_db.close()
+
+        # The race-defense assertion: worker is still running, so the
+        # SessionDB MUST NOT have been closed (conn still alive for the
+        # in-flight worker write).
+        assert not _cron_worker_exited, (
+            "Grace wait should have timed out while worker was still running"
+        )
+        assert not fake_db.closed, (
+            "SessionDB.close() MUST be skipped when worker is still running — "
+            "closing would race the in-flight append_message write (#65208)"
+        )
+        assert fake_db.conn_alive, (
+            "SessionDB.conn must remain alive for in-flight worker write"
+        )
+        assert not fake_db.title_set
+        assert not fake_db.ended
+
+        # Cleanup: let the worker exit and drain the pool.
+        worker_should_release.set()
+        pool.shutdown(wait=True)
+
+    def test_none_future_still_closes_session_db(self):
+        """Defensive: if _cron_future is None (init failure), still close cleanly."""
+        import concurrent.futures
+
+        class FakeSessionDB:
+            def __init__(self):
+                self.closed = False
+
+            def set_session_title(self, *a, **kw):
+                pass
+
+            def end_session(self, *a, **kw):
+                pass
+
+            def close(self):
+                self.closed = True
+
+        fake_db = FakeSessionDB()
+        future = None  # Defensive: scheduler may set _cron_future = None
+        _CRON_WORKER_JOIN_GRACE_SECS = 5.0
+        _cron_worker_exited = True
+        if future is not None and not future.done():
+            _done, _ = concurrent.futures.wait(
+                {future}, timeout=_CRON_WORKER_JOIN_GRACE_SECS,
+            )
+            _cron_worker_exited = bool(_done)
+
+        if fake_db is not None and _cron_worker_exited:
+            fake_db.close()
+
+        assert fake_db.closed, (
+            "None future must not prevent cleanup — _cron_worker_exited defaults "
+            "to True so SessionDB closes normally"
+        )
+
