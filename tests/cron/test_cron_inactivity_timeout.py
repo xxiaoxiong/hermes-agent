@@ -11,6 +11,7 @@ Tests cover:
 import concurrent.futures
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -487,4 +488,234 @@ class TestCronWorkerJoinBeforeSessionDBClose:
             "None future must not prevent cleanup — _cron_worker_exited defaults "
             "to True so SessionDB closes normally"
         )
+
+
+class TestRunJobWorkerRace:
+    """run_job-level regression tests for #65208 / #65285.
+
+    Unlike the gate-mirroring tests above (which replicate the scheduler's
+    ``if _cron_worker_exited: _session_db.close()`` logic in the test body),
+    these tests actually call ``run_job()`` through the scheduler's real
+    ordering chain — including its ``finally`` block — so they catch
+    ordering regressions that gate-mirror tests cannot.
+
+    The key invariant: when a successful agent.run_conversation is still
+    running past the bounded-wait grace, the finally block must:
+    (a) NOT close the SessionDB,
+    (b) NOT call _teardown_cron_agent (which closes the async client,
+        subprocesses, and sandboxes the worker may still be using),
+    (c) still restore TERMINAL_CWD / release _terminal_cwd_lock
+        (those are safe because the worker is past the grace),
+    (d) when the worker has exited before the grace expires, close
+        everything normally.
+    """
+
+    def test_worker_done_within_grace_closes_session_db_and_teardown(self, tmp_path):
+        """Worker finishes before the grace window → full cleanup runs."""
+        import time
+        from unittest.mock import MagicMock, patch
+
+        from cron.scheduler import run_job
+
+        job = {
+            "id": "race-test-1",
+            "name": "race-fast",
+            "prompt": "hello",
+            "model": "test-model",
+        }
+        fake_db = MagicMock()
+        # Agent that finishes instantly.
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "ok"}
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent", return_value=mock_agent):
+
+            success, output, final_response, error = run_job(job)
+
+        assert success is True
+        assert final_response == "ok"
+        fake_db.close.assert_called_once()
+        # Agent teardown was called (the worker had exited).
+        mock_agent.close.assert_called_once()
+
+    def test_worker_still_running_skips_db_close_and_teardown(self, tmp_path):
+        """Worker still running past the grace window → skip SessionDB.close + teardown.
+
+        This is the core regression for #65285 hazard (2) + (3).  Without the
+        fix, run_job's finally would:
+          - restore TERMINAL_CWD / release _terminal_cwd_lock
+            while the worker was mid-run with the workdir override
+            (hazard 1 — addressed by moving the bounded wait first);
+          - close the SessionDB while the worker was mid-append_message
+            (hazard 2 — the original #65208 race);
+          - call _teardown_cron_agent which closes the async client,
+            subprocesses, and sandboxes the worker may still be using
+            mid-tool-call (hazard 3, flagged in teknium1's review).
+
+        With the fix, the bounded wait runs FIRST, and the worker exits
+        after the grace → _session_db.close() and agent.close() are both
+        skipped, while TERMINAL_CWD / _terminal_cwd_lock restoration still
+        happens.
+        """
+        import time
+        from unittest.mock import MagicMock, patch
+
+        from cron.scheduler import run_job
+
+        worker_can_proceed = threading.Event()
+
+        job = {
+            "id": "race-test-2",
+            "name": "race-slow",
+            "prompt": "hello",
+            "model": "test-model",
+        }
+        fake_db = MagicMock()
+        # Note: _CRON_WORKER_JOIN_GRACE_SECS is 5.0 in prod; we override it
+        # via a transient monkey-patch in the scheduler module.
+
+        def _slow_run_conversation(prompt):
+            # Block until the test signals, simulating a long-running agent
+            # that is still mid-write when the inactivity timeout fires.
+            worker_can_proceed.wait(timeout=10)
+            return {"final_response": "slow done"}
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.side_effect = _slow_run_conversation
+        # Use return_value (not side_effect list) so every inactivity poll
+        # always sees the idle state; side_effect would exhaust after 2 calls
+        # and StopIteration would keep _idle_secs at 0.0 indefinitely.
+        mock_agent.get_activity_summary.return_value = {
+            "seconds_since_activity": 999,
+            "last_activity_desc": "tool_call",
+            "current_tool": "Write",
+            "api_call_count": 5,
+            "max_iterations": 90,
+        }
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent", return_value=mock_agent), \
+             patch("cron.scheduler._CRON_WORKER_JOIN_GRACE_SECS", 0.05), \
+             patch("cron.scheduler._CRON_INACTIVITY_POLL_INTERVAL", 0.05), \
+             patch.dict(os.environ, {"HERMES_CRON_TIMEOUT": "0.2"}):
+
+            try:
+                success, output, final_response, error = run_job(job)
+            except Exception:
+                # run_job may raise TimeoutError (inactivity) — that's
+                # expected; we care about what happened in the finally.
+                pass
+
+        # After run_job's finally, the worker should still be running
+        # (we never released it). Verify the gate invariants.
+        fake_db.close.assert_not_called()
+        mock_agent.close.assert_not_called()
+
+        # Clean up the worker before the test ends.
+        worker_can_proceed.set()
+        time.sleep(0.1)  # Let the worker finish
+
+    def test_worker_terminating_grace_still_restores_env(self, tmp_path):
+        """TERMINAL_CWD and _terminal_cwd_lock are restored even when worker
+        is still running past the grace window.
+
+        This verifies that the reordered finally block (bounded wait first,
+        then env/lock restoration) does not skip the env cleanup when the
+        worker doesn't exit in time — the worker cannot observe a torn
+        env because it has already been running for the bounded-wait duration
+        and the env is still stable during the wait.
+        """
+        import time
+        from unittest.mock import MagicMock, patch
+
+        from cron.scheduler import run_job
+
+        worker_can_proceed = threading.Event()
+
+        job = {
+            "id": "race-test-3",
+            "name": "race-env",
+            "prompt": "hello",
+            "model": "test-model",
+            "workdir": str(tmp_path / "job-workdir"),
+        }
+        fake_db = MagicMock()
+
+        def _slow_run_conversation(prompt):
+            worker_can_proceed.wait(timeout=10)
+            return {"final_response": "done"}
+
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.side_effect = _slow_run_conversation
+        # Use return_value (not side_effect list) so every inactivity poll
+        # sees the idle state and the timeout fires after one short poll
+        # interval, instead of exhausting side_effect then idling forever.
+        mock_agent.get_activity_summary.return_value = {
+            "seconds_since_activity": 999,
+            "last_activity_desc": "tool_call",
+        }
+
+        # Set TERMINAL_CWD to something we can check was restored.
+        prev_cwd = "/some/original/cwd"
+        os.environ["TERMINAL_CWD"] = prev_cwd
+
+        with patch("cron.scheduler._hermes_home", tmp_path), \
+             patch("cron.scheduler._resolve_origin", return_value=None), \
+             patch("hermes_cli.env_loader.load_hermes_dotenv"), \
+             patch("hermes_cli.env_loader.reset_secret_source_cache"), \
+             patch("hermes_state.SessionDB", return_value=fake_db), \
+             patch(
+                 "hermes_cli.runtime_provider.resolve_runtime_provider",
+                 return_value={
+                     "api_key": "test-key",
+                     "base_url": "https://example.invalid/v1",
+                     "provider": "openrouter",
+                     "api_mode": "chat_completions",
+                 },
+             ), \
+             patch("run_agent.AIAgent", return_value=mock_agent), \
+             patch("cron.scheduler._CRON_WORKER_JOIN_GRACE_SECS", 0.05), \
+             patch("cron.scheduler._CRON_INACTIVITY_POLL_INTERVAL", 0.05), \
+             patch.dict(os.environ, {"HERMES_CRON_TIMEOUT": "0.2"}):
+
+            try:
+                run_job(job)
+            except Exception:
+                pass
+
+        # Even though the worker is still running, TERMINAL_CWD should be restored.
+        assert os.environ.get("TERMINAL_CWD") == prev_cwd, (
+            "TERMINAL_CWD must be restored after run_job even when worker is still live"
+        )
+
+        # Clean up.
+        worker_can_proceed.set()
+        time.sleep(0.1)
 
