@@ -1012,8 +1012,11 @@ Important safety rule: cron-run sessions should not recursively schedule more cr
                 "description": "Optional human-friendly name"
             },
             "repeat": {
-                "type": "integer",
-                "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring)."
+                "anyOf": [
+                    {"type": "integer"},
+                    {"type": "string", "enum": ["forever", "infinite"]}
+                ],
+                "description": "Optional repeat count. Omit for defaults (once for one-shot, forever for recurring). Pass an integer for a fixed N-run job, or the string 'forever'/'infinite' to explicitly mark a recurring job as unbounded (equivalent to omitting on a recurring schedule)."
             },
             "deliver": {
                 "type": "string",
