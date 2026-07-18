@@ -1111,6 +1111,29 @@ def build_api_kwargs(agent, api_messages: list) -> dict:
     )
 
 
+def _coerce_assistant_content_to_str(content: object) -> str:
+    """Normalize an assistant message's ``content`` field to a string.
+
+    OpenAI-shaped providers normally return ``content`` as a plain string,
+    but multimodal / OpenRouter-format responses can return it as a list of
+    typed parts (``[{"type": "text", "text": "..."}, ...]``). Several
+    downstream operations in ``build_assistant_message`` ---
+    ``re.findall`` for inline <think> extraction, ``_sanitize_surrogates``,
+    and ``_strip_think_blocks`` --- crash on non-string input.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                parts.append(str(part.get("text", "")))
+            else:
+                parts.append(str(part))
+        return "".join(parts).strip()
+    # Could be None, an SDK enum type, etc. --- return empty string.
+    return str(content) if content else ""
+
 
 def build_assistant_message(agent, assistant_message, finish_reason: str) -> dict:
     """Build a normalized assistant message dict from an API response message.
@@ -1121,12 +1144,13 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     assistant_tool_calls = getattr(assistant_message, "tool_calls", None)
     reasoning_text = agent._extract_reasoning(assistant_message)
     _from_structured = bool(reasoning_text)
+    _raw_content = _coerce_assistant_content_to_str(assistant_message.content)
 
     # Fallback: extract inline <think> blocks from content when no structured
     # reasoning fields are present (some models/providers embed thinking
     # directly in the content rather than returning separate API fields).
     if not reasoning_text:
-        content = assistant_message.content or ""
+        content = _raw_content or ""
         think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
         if think_blocks:
             combined = "\n\n".join(b.strip() for b in think_blocks if b.strip())
@@ -1136,7 +1160,7 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {reasoning_text}")
 
     if reasoning_text and agent.reasoning_callback:
-        # Skip callback when streaming is active — reasoning was already
+        # Skip callback when streaming is active --- reasoning was already
         # displayed during the stream via one of two paths:
         #   (a) _fire_reasoning_delta (structured reasoning_content deltas)
         #   (b) _stream_delta tag extraction (<think>/<REASONING_SCRATCHPAD>)
@@ -1150,14 +1174,14 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
             except Exception:
                 pass
 
-    # Sanitize surrogates from API response — some models (e.g. Kimi/GLM via Ollama)
+    # Sanitize surrogates from API response --- some models (e.g. Kimi/GLM via Ollama)
     # can return invalid surrogate code points that crash json.dumps() on persist.
-    _raw_content = assistant_message.content or ""
+    # _raw_content is already coerced to str above via _coerce_assistant_content_to_str.
     _san_content = _sanitize_surrogates(_raw_content)
     if reasoning_text:
         reasoning_text = _sanitize_surrogates(reasoning_text)
 
-    # Strip inline reasoning tags (<think>…</think> etc.) from the stored
+    # Strip inline reasoning tags (<think>...</think> etc.) from the stored
     # assistant content.  Reasoning was already captured into
     # ``reasoning_text`` above (either from structured fields or the
     # inline-block fallback), so the raw tags in content are redundant.
@@ -1176,7 +1200,7 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
     # If the model accidentally inlines a secret in its natural-language
     # response, catch it here at the persistence boundary so it never
     # reaches state.db, session_*.json, gateway delivery, or compression.
-    # Respects HERMES_REDACT_SECRETS via redact_sensitive_text — no-op
+    # Respects HERMES_REDACT_SECRETS via redact_sensitive_text --- no-op
     # when disabled. (#19798)
     if isinstance(_san_content, str) and _san_content:
         from agent.redact import redact_sensitive_text

@@ -2347,6 +2347,52 @@ class TestBuildAssistantMessage:
         assert "reasoning that never closes" not in result["content"]
         assert result["content"] == ""
 
+    def test_list_of_text_parts_content_coerced_to_str(self, agent):
+        """Multimodal list-of-parts content (issue #66267, #66717, #66755) is
+        coerced to a plain string before reaching re.findall /
+        _sanitize_surrogates / _strip_think_blocks.
+        """
+        msg = _mock_assistant_msg(
+            content=[
+                {"type": "text", "text": "The actual answer."},
+            ]
+        )
+        result = agent._build_assistant_message(msg, "stop")
+        assert result["content"] == "The actual answer."
+        assert result["reasoning"] is None
+    def test_list_of_text_parts_with_think_block_coerced(self, agent):
+        """List-of-parts content with an inline THINK block: reasoning is
+        extracted from the concatenated text and stripped from content.
+        """
+        msg = _mock_assistant_msg(
+            content=[
+                {"type": "text", "text": "<think>some quick THINKing</think>"},
+                {"type": "text", "text": "The final answer."},
+            ]
+        )
+        result = agent._build_assistant_message(msg, "stop")
+        assert result["reasoning"] == "some quick THINKing"
+        # The think tags and reasoning content should be stripped from content
+        assert "some quick THINKing" not in result["content"]
+        assert "The final answer." in result["content"]
+
+
+    def test_list_of_parts_with_image_url_coerced_to_text_only(self, agent):
+        """Image parts (no text field) are dropped; remaining text parts
+        are preserved without crashing the regex/surrogate paths.
+        """
+        msg = _mock_assistant_msg(
+            content=[
+                {"type": "text", "text": "Here is what I saw."},
+                {"type": "image_url", "image_url": {"url": "data:..."}},
+            ]
+        )
+        result = agent._build_assistant_message(msg, "stop")
+        assert result["content"] == "Here is what I saw."
+        assert "image_url" not in result["content"]
+
+
+
 
 class TestFormatToolsForSystemMessage:
     def test_no_tools_returns_empty_array(self, agent):
