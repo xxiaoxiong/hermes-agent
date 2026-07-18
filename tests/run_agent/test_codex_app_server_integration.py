@@ -787,3 +787,44 @@ class TestCodexToolProgressBridge:
         assert "on_event" in captured_init and captured_init["on_event"] is not None
         assert ("tool.started", "exec_command", "pytest") in events
 
+
+class TestCodexAgentClose:
+    """#66671: AIAgent.close() must close the _codex_session subprocess
+    so long-running hermes serve doesn't orphan codex app-server trees."""
+
+    def test_close_closes_codex_session(self):
+        """agent.close() must call close() on _codex_session and null it."""
+        agent = _make_codex_agent()
+        from unittest.mock import MagicMock
+        fake_session = MagicMock()
+        agent._codex_session = fake_session
+
+        agent.close()
+
+        fake_session.close.assert_called_once()
+        assert getattr(agent, "_codex_session", None) is None
+
+    def test_close_handles_missing_codex_session(self):
+        """agent.close() must not crash when _codex_session was never set
+        (non-codex agent paths)."""
+        agent = _make_codex_agent()
+        # Ensure no _codex_session attribute exists
+        if hasattr(agent, "_codex_session"):
+            del agent._codex_session
+
+        # Must not raise
+        agent.close()
+
+    def test_close_idempotent_on_codex_session(self):
+        """Calling agent.close() twice must not double-close the session
+        (the first call nulls _codex_session, the second skips)."""
+        agent = _make_codex_agent()
+        from unittest.mock import MagicMock
+        fake_session = MagicMock()
+        agent._codex_session = fake_session
+
+        agent.close()
+        agent.close()
+
+        fake_session.close.assert_called_once()
+        assert agent._codex_session is None

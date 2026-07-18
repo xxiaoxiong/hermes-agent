@@ -3609,6 +3609,27 @@ class AIAgent:
         except Exception:
             pass
 
+        # 5b. Close the Codex app-server session if this agent owns one.
+        # The lazy `_codex_session` is spawned on first codex-app-server turn
+        # (agent/codex_runtime.py) and reused across turns, but the only
+        # `_codex_session.close()` calls in the codebase were the crash/retire
+        # paths. Without this step, every session.close on the Codex route
+        # leaks one `codex app-server` subprocess plus its MCP children forever
+        # (#66671). Idempotent + guarded so a non-codex agent (no attribute)
+        # and a double-close both no-op.
+        try:
+            codex_session = getattr(self, "_codex_session", None)
+            if codex_session is not None:
+                codex_session.close()
+                self._codex_session = None
+        except Exception:
+            # Best-effort: still drop the reference so we don't retry on a
+            # half-closed session, and don't suppress the rest of close().
+            try:
+                self._codex_session = None
+            except Exception:
+                pass
+
         # 6. Free conversation history.  Mirrors _release_evicted_agent_soft's
         # soft-eviction clear — close() is the hard teardown for true session
         # boundaries (/new, /reset, session expiry), so the message list won't
