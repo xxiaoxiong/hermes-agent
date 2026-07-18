@@ -176,18 +176,59 @@ def _sanitize_env_file_if_needed(path: Path) -> None:
     with ``ValueError: embedded null byte`` — typically introduced by
     copy-pasting API keys from terminals or rich-text editors.
 
+    Also detects UTF-16 + BOM (common from Windows Notepad "Unicode" save).
+    The file is transparently re-encoded as UTF-8 so the subsequent UTF-8
+    sanitizer does not corrupt the first key (see #66474).
+
     We delegate to ``hermes_cli.config._sanitize_env_lines`` which
     already knows all valid Hermes env-var names and can split
     concatenated lines correctly.
     """
     if not path.exists():
         return
+    read_kw = {"encoding": "utf-8-sig", "errors": "replace"}
+
+    # --- UTF-16 + BOM detection (#66474) ---
+    # Before opening with utf-8-sig (which would mangle the first key),
+    # check the raw bytes for a UTF-16 BOM and re-encode transparently.
+    try:
+        _raw = path.read_bytes()
+    except OSError:
+        return  # can't read — skip silently (best-effort)
+    if _raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        try:
+            text = _raw.decode("utf-16")
+        except UnicodeDecodeError:
+            pass  # fall through to utf-8-sig which may still work
+        else:
+            # Re-encode as UTF-8 and atomically replace.
+            _utf8 = text.encode("utf-8")
+            import tempfile
+
+            fd, tmp = tempfile.mkstemp(
+                dir=str(path.parent), suffix=".tmp", prefix=".env_"
+            )
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(_utf8)
+                    f.flush()
+                    os.fsync(f.fileno())
+                atomic_replace(tmp, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+                raise
+            _raw = _utf8  # for the read step below
+        # Now proceed with normal sanitizer on the re-encoded content.
+        # (read_kw still uses utf-8-sig, which is fine for the now-UTF-8 file)
+
     try:
         from hermes_cli.config import _sanitize_env_lines
     except ImportError:
         return  # early bootstrap — config module not available yet
 
-    read_kw = {"encoding": "utf-8-sig", "errors": "replace"}
     try:
         with open(path, **read_kw) as f:
             original = f.readlines()

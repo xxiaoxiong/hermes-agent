@@ -103,3 +103,72 @@ def test_main_import_applies_user_env_over_shell_values(tmp_path, monkeypatch):
 
     assert os.getenv("OPENAI_BASE_URL") == "https://new.example/v1"
     assert os.getenv("HERMES_INFERENCE_PROVIDER") == "custom"
+
+
+import codecs
+
+
+def test_utf16_le_bom_env_is_transcoded(tmp_path, monkeypatch):
+    """Regression for #66474: UTF-16 LE + BOM must not corrupt the first key.
+
+    Windows Notepad "Unicode" save produces UTF-16-LE + BOM.  Before the fix,
+    the sanitizer opened the file as utf-8-sig with errors=replace, which
+    turned the FF FE BOM into U+FFFD U+FFFD glued onto the first key name,
+    then rewrote the file with the mangled bytes — permanently dropping the
+    key from `os.environ` even after a later UTF-8 editor re-save.
+    """
+    home = tmp_path / "hermes"
+    home.mkdir()
+    env_file = home / ".env"
+    content = "HERMES_TEST_KEY_UTF16=hello_utf16\nSECOND_KEY=world\n"
+    env_file.write_bytes(codecs.BOM_UTF16_LE + content.encode("utf-16-le"))
+
+    monkeypatch.delenv("HERMES_TEST_KEY_UTF16", raising=False)
+    monkeypatch.delenv("SECOND_KEY", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.getenv("HERMES_TEST_KEY_UTF16") == "hello_utf16"
+    assert os.getenv("SECOND_KEY") == "world"
+    # No mangled-name leak into os.environ
+    assert os.getenv("\ufffd\ufffdHERMES_TEST_KEY_UTF16") is None
+    # On-disk file is now valid UTF-8 with the original key intact
+    on_disk = env_file.read_text(encoding="utf-8-sig")
+    assert "HERMES_TEST_KEY_UTF16=hello_utf16" in on_disk
+    assert "SECOND_KEY=world" in on_disk
+
+
+def test_utf16_be_bom_env_is_transcoded(tmp_path, monkeypatch):
+    """Regression for #66474: UTF-16 BE + BOM likewise transcoded."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    env_file = home / ".env"
+    content = "BE_KEY=value_be\nOTHER=ok\n"
+    env_file.write_bytes(codecs.BOM_UTF16_BE + content.encode("utf-16-be"))
+
+    monkeypatch.delenv("BE_KEY", raising=False)
+    monkeypatch.delenv("OTHER", raising=False)
+
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.getenv("BE_KEY") == "value_be"
+    assert os.getenv("OTHER") == "ok"
+    on_disk = env_file.read_text(encoding="utf-8-sig")
+    assert "BE_KEY=value_be" in on_disk
+
+
+def test_utf8_file_unchanged_when_no_bom(tmp_path, monkeypatch):
+    """Sanity guard: a plain UTF-8 file must not be rewritten just for BOM detection."""
+    home = tmp_path / "hermes"
+    home.mkdir()
+    env_file = home / ".env"
+    content = "PLAIN_KEY=plain_value\n"
+    env_file.write_text(content, encoding="utf-8")
+    mtime_before = env_file.stat().st_mtime_ns
+
+    monkeypatch.delenv("PLAIN_KEY", raising=False)
+    load_hermes_dotenv(hermes_home=home)
+
+    assert os.getenv("PLAIN_KEY") == "plain_value"
+    # File content unchanged
+    assert env_file.read_text(encoding="utf-8") == content
