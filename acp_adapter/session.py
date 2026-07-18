@@ -284,12 +284,21 @@ class SessionManager:
 
         # Collect in-memory sessions first.
         with self._lock:
-            seen_ids = set(self._sessions.keys())
+            # Only record live IDs whose in-memory history is non-empty. Earlier
+            # versions seeded ``seen_ids`` from ``self._sessions.keys()`` before
+            # the history-length check, which meant a live session whose
+            # transcript lived entirely in ``SessionDB`` (the ACP runtime path
+            # where the agent persists the transcript through its own database
+            # handle) was treated as "already seen" and skipped by the durable
+            # fallback below -- hiding it from ``session/list`` even though its
+            # persisted row had messages (issue #66881).
+            seen_ids = set()
             results = []
             for s in self._sessions.values():
                 history_len = len(s.history)
                 if history_len <= 0:
                     continue
+                seen_ids.add(s.session_id)
                 if normalized_cwd and _normalize_cwd_for_compare(s.cwd) != normalized_cwd:
                     continue
                 persisted = persisted_rows.get(s.session_id, {})

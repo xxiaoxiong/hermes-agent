@@ -564,6 +564,71 @@ class TestPersistence:
         assert listing[0]["updated_at"]
         assert listing[1]["updated_at"]
 
+    def test_list_sessions_includes_durable_rows_when_live_history_empty(self, tmp_path):
+        """Regression for #66881: a live session whose in-memory history is empty
+        (because the ACP agent persists the transcript through its own DB handle
+        and never populates ``state.history``) must still surface in
+        ``list_sessions`` via its durable SessionDB rows.
+
+        Earlier versions seeded ``seen_ids`` from ``self._sessions.keys()`` before
+        the history-length check, which caused the durable fallback to skip the
+        live-but-empty session — hiding it from ``session/list`` even though its
+        persisted row had messages.
+        """
+        db = SessionDB(tmp_path / "state.db")
+
+        def factory():
+            # Mimic a live ACP agent that owns persistence to this same db.
+            return SimpleNamespace(
+                model="test-model",
+                _session_db=db,
+                _session_db_created=True,
+            )
+
+        manager = SessionManager(agent_factory=factory, db=db)
+        state = manager.create_session(cwd="/durable")
+
+        # Simulate the ACP runtime path: the agent persisted the turn directly
+        # through SessionDB and never touched ``state.history``.
+        db.append_message(
+            session_id=state.session_id, role="user", content="durable needle"
+        )
+        db.append_message(
+            session_id=state.session_id, role="assistant", content="durable reply"
+        )
+        assert state.history == []  # in-memory mirror untouched
+
+        listing = manager.list_sessions()
+        ids = {item["session_id"] for item in listing}
+        assert state.session_id in ids
+        match = next(item for item in listing if item["session_id"] == state.session_id)
+        assert match["history_len"] == 2
+        assert match["cwd"] == "/durable"
+
+    def test_list_sessions_durable_fallback_respects_cwd_filter(self, tmp_path):
+        """The durable fallback for live-but-empty sessions must honor the
+        ``cwd`` filter the same way the in-memory path does (issue #66881)."""
+        db = SessionDB(tmp_path / "state.db")
+
+        def factory():
+            return SimpleNamespace(
+                model="test-model",
+                _session_db=db,
+                _session_db_created=True,
+            )
+
+        manager = SessionManager(agent_factory=factory, db=db)
+        keep = manager.create_session(cwd="/keep")
+        drop = manager.create_session(cwd="/drop")
+        for s in (keep, drop):
+            db.append_message(session_id=s.session_id, role="user", content="x")
+            assert s.history == []
+
+        listing = manager.list_sessions(cwd="/keep")
+        ids = {item["session_id"] for item in listing}
+        assert keep.session_id in ids
+        assert drop.session_id not in ids
+
     def test_fork_restores_source_from_db(self, manager):
         """Forking a session that is only in DB should work."""
         original = manager.create_session()
