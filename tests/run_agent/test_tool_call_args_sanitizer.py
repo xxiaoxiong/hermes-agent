@@ -1,6 +1,7 @@
 """Tests for AIAgent._sanitize_tool_call_arguments."""
 
 import copy
+import json
 import logging
 
 from run_agent import AIAgent
@@ -163,3 +164,50 @@ def test_non_assistant_messages_ignored():
 
     assert repaired == 0
     assert messages == original
+
+
+def test_single_element_array_unwrapped_to_object():
+    """Single-element JSON array whose element is a dict ⇒ unwrap the element.
+
+    Some models (notably MOA aggregators like glm-5.2) wrap the arguments
+    object in a one-element array. Without unwrapping, strict OpenAI-compatible
+    providers reject it with HTTP 400 InvalidParameter (#58057).
+    """
+    messages = [
+        _assistant_message(
+            _tool_call(arguments='[{"path":"/tmp/foo"}]')
+        ),
+    ]
+    repaired = AIAgent._sanitize_tool_call_arguments(messages)
+    assert repaired == 0  # unwrap is not a "repair" — it's normalization
+    assert json.loads(messages[0]["tool_calls"][0]["function"]["arguments"]) == {
+        "path": "/tmp/foo"
+    }
+
+
+def test_multi_element_array_replaced_with_empty_object(caplog):
+    """Multi-element array ⇒ repair to '{}' (can't unwrap meaningfully)."""
+    messages = [
+        _assistant_message(
+            _tool_call(arguments='[{"a":1},{"b":2}]')
+        ),
+    ]
+    with caplog.at_level(logging.WARNING, logger="run_agent"):
+        repaired = AIAgent._sanitize_tool_call_arguments(messages)
+    assert repaired == 1
+    assert messages[0]["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert any("Corrupted" in r.message for r in caplog.records)
+
+
+def test_scalar_json_array_replaced_with_empty_object():
+    """Scalar JSON values ('42', '"foo"', null, false) ⇒ repair to '{}'."""
+    marker = AIAgent._TOOL_CALL_ARGUMENTS_CORRUPTION_MARKER
+    for scalar in ["42", '"foo"', "null", "false"]:
+        messages = [
+            _assistant_message(_tool_call(arguments=scalar)),
+        ]
+        repaired = AIAgent._sanitize_tool_call_arguments(messages)
+        assert repaired == 1, f"scalar {scalar} should be repaired, got {repaired}"
+        assert (
+            messages[0]["tool_calls"][0]["function"]["arguments"] == "{}"
+        ), f'expected "{{}}" for {scalar}'

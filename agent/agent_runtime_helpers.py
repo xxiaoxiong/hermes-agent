@@ -303,9 +303,38 @@ def sanitize_tool_call_arguments(
             if not isinstance(arguments, str):
                 continue
 
+            # Repair target. ``None`` means "no repair needed"; otherwise it's
+            # the replacement arguments string (always ``"{}"`` for the
+            # non-dict case). Set when the JSON is invalid OR syntactically
+            # valid but not a JSON object (e.g. an array). Strict
+            # OpenAI-compatible providers reject tool_call.arguments that
+            # parse to a non-dict (Volcengine Ark / glm-5.2 returned HTTP 400
+            # InvalidParameter for ``[{\"mode\":\"replace\"}]``); without this
+            # check the malformed payload is persisted to state.db and
+            # replayed on every subsequent call, permanently killing the
+            # session (#58057). Single-element arrays whose element is itself
+            # a dict are unwrapped to that dict (some models wrap the args
+            # object in a one-element array — common with MOA aggregators);
+            # multi-element arrays and scalar JSON values fall through to the
+            # ``{}`` repair path.
+            repaired_arguments: Optional[str] = None
             try:
-                json.loads(arguments)
+                parsed = json.loads(arguments)
             except json.JSONDecodeError:
+                repaired_arguments = "{}"
+            else:
+                if isinstance(parsed, dict):
+                    pass
+                elif (
+                    isinstance(parsed, list)
+                    and len(parsed) == 1
+                    and isinstance(parsed[0], dict)
+                ):
+                    function["arguments"] = json.dumps(parsed[0])
+                else:
+                    repaired_arguments = "{}"
+
+            if repaired_arguments is not None:
                 # Use the canonical ``call_id || id`` precedence so both the
                 # scan for an existing tool result and any inserted stub key
                 # on the same id the rest of the pipeline uses. Keying on bare
@@ -324,7 +353,7 @@ def sanitize_tool_call_arguments(
                     function_name,
                     preview,
                 )
-                function["arguments"] = "{}"
+                function["arguments"] = repaired_arguments
 
                 existing_tool_msg = None
                 scan_index = message_index + 1
