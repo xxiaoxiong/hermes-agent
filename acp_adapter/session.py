@@ -422,7 +422,15 @@ class SessionManager:
         # Ensure model is a plain string (not a MagicMock or other proxy).
         model_str = str(state.model) if state.model else None
         session_meta = {"cwd": state.cwd}
-        provider = getattr(state.agent, "provider", None)
+        # Prefer the namespaced requested provider (e.g. ``custom:anthropic``)
+        # over the normalized ``agent.provider`` (which collapses to bare
+        # ``"custom"`` for any custom_providers entry). Without the namespace,
+        # session restore cannot re-resolve the named custom provider and
+        # auth fails (#63681).
+        provider = (
+            getattr(state.agent, "requested_provider", None)
+            or getattr(state.agent, "provider", None)
+        )
         base_url = getattr(state.agent, "base_url", None)
         api_mode = getattr(state.agent, "api_mode", None)
         if isinstance(provider, str) and provider.strip():
@@ -644,11 +652,27 @@ class SessionManager:
                     "args": list(runtime.get("args") or []),
                 }
             )
+            # Preserve the *namespaced* requested provider (e.g. ``custom:anthropic``)
+            # alongside the normalized one. ``resolve_runtime_provider`` returns
+            # ``runtime["provider"]`` normalized to a bare ``"custom"`` for custom
+            # providers, which loses the namespace required to re-resolve the
+            # entry on session restore. Stash the original requested string on
+            # the agent so ``_persist`` can write it to the DB instead of the
+            # normalized value (issue #63681).
+            runtime_requested = runtime.get("requested_provider")
+            if isinstance(runtime_requested, str) and runtime_requested.strip():
+                resolved_namespace = runtime_requested
+            else:
+                resolved_namespace = requested_provider or config_provider
         except Exception:
             logger.debug("ACP session falling back to default provider resolution", exc_info=True)
+            resolved_namespace = requested_provider or config_provider
 
         _register_task_cwd(session_id, cwd)
         agent = AIAgent(**kwargs)
+        # Stash the namespaced provider so _persist writes it to the DB
+        # instead of the normalized bare "custom" (issue #63681).
+        agent.requested_provider = resolved_namespace
         # Codex app-server sessions are spawned lazily on the first turn. Stamp
         # the ACP workspace onto the agent so the Codex runtime starts from the
         # editor/session cwd instead of the Hermes daemon's process cwd.

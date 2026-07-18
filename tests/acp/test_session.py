@@ -727,6 +727,81 @@ class TestPersistence:
         assert restored.agent.provider == "anthropic"
         assert restored.agent.base_url == "https://anthropic.example/v1"
 
+    def test_restore_preserves_custom_anthropic_namespace(self, tmp_path, monkeypatch):
+        """Namespaced custom provider (``custom:anthropic``) must survive persist → restore.
+
+        Regression for #63681: ``resolve_runtime_provider`` returns
+        ``provider="custom"`` (normalized), but the DB needs the original
+        ``"custom:anthropic"`` so ``_restore`` can re-resolve the named custom
+        provider entry.
+        """
+        # Simulate what ``_resolve_named_custom_runtime`` returns: provider
+        # normalized to ``"custom"`` but ``requested_provider`` retains the
+        # full namespace.
+        runtime_return = {
+            "provider": "custom",
+            "requested_provider": "custom:anthropic",
+            "api_mode": "anthropic_messages",
+            "base_url": "https://anthropic-custom.example/v1",
+            "api_key": "test-key",
+            "command": None,
+            "args": [],
+        }
+
+        resolve_calls = []
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            resolve_calls.append(requested)
+            return dict(runtime_return)
+
+        captured_kwargs = {}
+
+        def fake_agent(**kwargs):
+            captured_kwargs.update(kwargs)
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                base_url=kwargs.get("base_url"),
+                api_mode=kwargs.get("api_mode"),
+            )
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {"provider": "custom:anthropic", "default": "test-model"}
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        db = SessionDB(tmp_path / "state.db")
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            manager = SessionManager(db=db)
+            state = manager.create_session(cwd="/work")
+
+        # The agent must have ``requested_provider`` stamped by _make_agent.
+        assert getattr(state.agent, "requested_provider", None) == "custom:anthropic"
+        manager.save_session(state.session_id)
+
+        # Verify the DB stored the namespaced provider (not bare "custom").
+        row = db.get_session(state.session_id)
+        mc = json.loads(row["model_config"])
+        assert mc.get("provider") == "custom:anthropic", (
+            f"Expected 'custom:anthropic', got {mc.get('provider')!r}"
+        )
+
+        # Drop from memory and restore — the namespaced provider must survive.
+        sid = state.session_id
+        resolve_calls.clear()
+        with manager._lock:
+            del manager._sessions[sid]
+
+        restored = manager.get_session(sid)
+        assert restored is not None
+        assert (
+            getattr(restored.agent, "requested_provider", None) == "custom:anthropic"
+        ), "Restored agent lost the namespaced provider"
+        assert restored.agent.base_url == "https://anthropic-custom.example/v1"
+
     def test_acp_agents_route_human_output_to_stderr(self, tmp_path, monkeypatch):
         """ACP agents must keep stdout clean for JSON-RPC stdio transport."""
 
