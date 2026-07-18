@@ -986,6 +986,19 @@ def memory_tool(
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
 
+    # --- Guard: neither action nor operations provided ---------------------
+    # The schema marks both as optional (because each belongs to a different
+    # call shape — single-op vs batch), but at least one MUST be present.
+    # Catching this here produces a clear error message instead of the
+    # confusing ``Unknown action 'None'`` that follows if we let action=None
+    # fall through to the else-branch below (#64291).
+    if action is None and not operations:
+        return tool_error(
+            "Either 'action' (single-op: add/replace/remove) or 'operations' "
+            "(batch list) is required.",
+            success=False,
+        )
+
     # --- Batch path -------------------------------------------------------
     if operations:
         if not isinstance(operations, list):

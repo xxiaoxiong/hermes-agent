@@ -559,6 +559,20 @@ class TestMemoryToolDispatcher:
         result = json.loads(memory_tool(action="unknown", store=store))
         assert result["success"] is False
 
+    def test_missing_action_and_operations_returns_clear_error(self, store):
+        """#64291: a tool call that supplies target but omits both ``action``
+        and ``operations`` used to fall through to the ``else`` branch and
+        surface as ``Unknown action 'None'``, which gave the model no signal
+        about *which* parameter was missing. The runtime guard must catch this
+        before dispatch and return an explicit, named error."""
+        result = json.loads(memory_tool(target="memory", store=store))
+        assert result["success"] is False
+        # The error must name the two valid shapes, not just say
+        # ``Unknown action 'None'``.
+        assert "action" in result["error"]
+        assert "operations" in result["error"]
+        assert "Unknown action" not in result["error"]
+
     def test_add_via_tool(self, store):
         result = json.loads(memory_tool(action="add", target="memory", content="via tool", store=store))
         assert result["success"] is True
