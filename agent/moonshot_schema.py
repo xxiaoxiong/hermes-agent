@@ -170,15 +170,29 @@ def _fill_missing_type(node: Dict[str, Any]) -> Dict[str, Any]:
 def sanitize_moonshot_tool_parameters(parameters: Any) -> Dict[str, Any]:
     """Normalize tool parameters to a Moonshot-compatible object schema.
 
-    Returns a deep-copied schema with the two flavored-JSON-Schema repairs
+    Returns a deep-copied schema with the flavored-JSON-Schema repairs
     applied.  Input is not mutated.
+
+    Repairs applied:
+
+    1. Every property schema carries a ``type`` (Moonshot rejects nodes
+       without one).  See ``_repair_schema`` / ``_fill_missing_type``.
+    2. ``type`` at the parent of ``anyOf`` is stripped; null-type branches
+       are collapsed so nullable fields round-trip cleanly.
+    3. Top-level object schema always carries an explicit ``required`` array
+       (Moonshot's validator 400s on its absence, ``details: <At path
+       'required': required must be an array>``).  Entries that don't
+       exist in ``properties`` are pruned to defend against dangling refs.
+
+       Standard JSON Schema makes ``required`` optional; Moonshot does not.
+       See #66835.
     """
     if not isinstance(parameters, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "object", "properties": {}, "required": []}
 
     repaired = _repair_schema(copy.deepcopy(parameters), is_schema=True)
     if not isinstance(repaired, dict):
-        return {"type": "object", "properties": {}}
+        return {"type": "object", "properties": {}, "required": []}
 
     # Top-level must be an object schema
     if repaired.get("type") != "object":
@@ -186,7 +200,39 @@ def sanitize_moonshot_tool_parameters(parameters: Any) -> Dict[str, Any]:
     if "properties" not in repaired:
         repaired["properties"] = {}
 
+    _ensure_required_list(repaired)
+
     return repaired
+
+
+def _ensure_required_list(schema: Dict[str, Any]) -> None:
+    """Force ``required`` to a list of valid property names (in place).
+
+    Moonshot's tool-parameter validator rejects schemas that omit the
+    ``required`` key, and also rejects dangling entries that don't exist
+    in ``properties``.  Treat both cases:
+
+    - Missing or non-list ``required`` -> ``[]``
+    - List -> filtered to entries that are present in ``properties``
+
+    Only mutates the dict if ``required`` is absent, mistyped, or has
+    dangling entries.
+    """
+    props = schema.get("properties")
+    if not isinstance(props, dict):
+        # Should not happen (caller ensures properties is a dict), but
+        # still be defensive about the type.
+        schema["required"] = []
+        return
+
+    raw = schema.get("required")
+    if not isinstance(raw, list):
+        schema["required"] = []
+        return
+
+    pruned = [name for name in raw if isinstance(name, str) and name in props]
+    if len(pruned) != len(raw):
+        schema["required"] = pruned
 
 
 def sanitize_moonshot_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
